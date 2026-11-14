@@ -1,0 +1,27 @@
+name: native-linux
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev librubberband-dev libsndfile1-dev
+      - run: cmake -S . -B build -DCVDAW_TARGET=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - run: python3 -m py_compile perception/run.py
+      - run: cmake -S realtime -B realtime/build -DCMAKE_BUILD_TYPE=Release -DCV_DAW_WITH_RUBBERBAND=ON
+      - run: cmake --build realtime/build --parallel 2
+      - run: ctest --test-dir realtime/build --output-on-failure
+  cortex-a35-compile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++-aarch64-linux-gnu
+      - run: >-
+          cmake -S realtime -B realtime/build-arm
+          -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+          -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+          -DCV_DAW_CORTEX_A35=ON -DCV_DAW_WITH_RUBBERBAND=OFF
+      - run: cmake --build realtime/build-arm --parallel 2

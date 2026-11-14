@@ -19,7 +19,7 @@ def main():
     # 3. Asignar un canal exclusivo para el brazo izquierdo
     canal_izquierdo = pygame.mixer.Channel(0)
     
-    cap = cv2.VideoCapture('brazo2.mp4')
+    cap = cv2.VideoCapture('0')
     detector = BodyDetector()
 
     zona_actual = 0 

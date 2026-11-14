@@ -1,0 +1,20 @@
+[Unit]
+Description=CV-DAW isolated ALSA audio engine
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=cvdaw
+Group=audio
+WorkingDirectory=/opt/cvdaw
+ExecStart=/opt/cvdaw/build/cvdaw-audio 128
+CPUAffinity=1
+LimitRTPRIO=90
+LimitMEMLOCK=infinity
+LimitNOFILE=256
+Restart=no
+TimeoutStopSec=3
+
+[Install]
+WantedBy=multi-user.target

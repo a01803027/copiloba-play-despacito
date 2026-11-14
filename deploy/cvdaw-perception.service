@@ -1,0 +1,21 @@
+[Unit]
+Description=CV-DAW camera perception and musical brain
+Requires=cvdaw-audio.service
+After=cvdaw-audio.service
+
+[Service]
+Type=simple
+User=cvdaw
+Group=audio
+SupplementaryGroups=video
+WorkingDirectory=/opt/cvdaw
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+CPUAffinity=0
+# exposure_absolute=50 is an EXAMPLE; configure for the actual camera.
+ExecStart=/usr/bin/python3 /opt/cvdaw/perception/run.py --exposure 50
+Restart=no
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target
