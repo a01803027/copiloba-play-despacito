@@ -8,3 +8,6 @@ djvision/
 .vscode/
 /build*/
 /realtime/build*/
+
+.venv-mac/
+artifacts/

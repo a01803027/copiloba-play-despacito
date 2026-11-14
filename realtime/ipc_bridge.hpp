@@ -17,7 +17,7 @@
 
 namespace cv_daw {
 inline constexpr char shm_name[]="/cv_daw_shm";
-inline constexpr uint32_t ipc_magic=0x43564457, ipc_version=1, command_capacity=256;
+inline constexpr uint32_t ipc_magic=0x43564457, ipc_version=2, command_capacity=256;
 static_assert(std::endian::native==std::endian::little);
 static_assert(std::atomic<uint32_t>::is_always_lock_free && sizeof(std::atomic<uint32_t>)==4);
 static_assert(std::atomic<uint64_t>::is_always_lock_free && sizeof(std::atomic<uint64_t>)==8);
@@ -59,6 +59,7 @@ struct alignas(64) AtomicControlBlock {
  std::array<std::atomic<float>,4> limb_pitch_bend{{0,0,0,0}}; // semitones [-12,+12]
  std::atomic<float> target_bpm{120},groove_energy{0.5f};
  std::array<std::atomic<float>,4> stem_volumes{{0.6f,0.6f,0.6f,0.6f}};
+ std::array<std::atomic<float>,4> limb_gain{{1,1,1,1}};
 };
 struct alignas(64) IpcHeader {
  std::atomic<uint32_t> magic{0};
@@ -70,6 +71,7 @@ struct alignas(64) Telemetry {
  std::atomic<uint64_t> total_samples_rendered{0},commands_consumed{0},producer_drops{0},invalid_commands{0};
  std::atomic<uint64_t> late_commands{0},scheduler_overflows{0},sixteenth_ticks{0},stem_starved_frames{0};
  std::atomic<uint64_t> xruns{0},rendered_peak_bits{0};
+ std::atomic<uint64_t> callback_count{0},callback_sum_ticks{0},callback_max_ticks{0},counter_frequency{0};
 };
 struct alignas(64) SharedMemory {
  IpcHeader header;AtomicControlBlock controls;CommandQueue commands;Telemetry telemetry;

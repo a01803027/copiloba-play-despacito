@@ -34,6 +34,7 @@ int cv_daw_control(void* memory,uint32_t group,uint32_t index,float value,uint32
  case 2:c.limb_pitch_bend[index].store(std::clamp(value,-12.f,12.f),std::memory_order_relaxed);break;
  case 3:c.target_bpm.store(std::clamp(value,60.f,200.f),std::memory_order_relaxed);break;
  case 4:c.groove_energy.store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
+ case 6:c.limb_gain[index].store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
  case 5:c.stem_volumes[index].store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
  default:return 0;
  }return 1;
@@ -50,6 +51,10 @@ uint64_t cv_daw_metric(void* memory,uint32_t index){
  case 6:return t.sixteenth_ticks.load(std::memory_order_relaxed);
  case 7:return t.stem_starved_frames.load(std::memory_order_relaxed);
  case 8:return t.xruns.load(std::memory_order_relaxed);
+ case 9:return t.callback_count.load(std::memory_order_relaxed);
+ case 10:return t.callback_sum_ticks.load(std::memory_order_relaxed);
+ case 11:return t.callback_max_ticks.load(std::memory_order_relaxed);
+ case 12:return t.counter_frequency.load(std::memory_order_relaxed);
  default:return 0;
  }
 }

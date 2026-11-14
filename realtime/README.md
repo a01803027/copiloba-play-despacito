@@ -1,7 +1,14 @@
-# Modules 4 and 5 — Cortex-A35 / OpenSTLinux
+# Modules 4 and 5 — macOS / Cortex-A35 / OpenSTLinux
+
+For the integrated dance composer and beginner macOS instructions, start with
+[MAC_SETUP.md](../MAC_SETUP.md). macOS now uses miniaudio CoreAudio for live audio.
+The producer ABI is version 2, with smoothed per-limb gains (control group 6) and
+optional callback timing telemetry. Rebuild the native library and engine together.
+The following low-level instructions remain useful for standalone/board work.
+
 
 This directory is a standalone C++20 implementation of the requested IPC ABI and
-miniaudio audio engine. It is independent of the earlier `include/cvdaw` engine:
+miniaudio audio engine, driven by the Python composer in `composer/`. It is independent of the earlier `include/cvdaw` engine:
 use **one** engine/brain pipeline at a time. Its shared memory is `/cv_daw_shm`,
 not the earlier `/cvdaw`. The existing musical brain/frontend must use this new
 ABI/native producer bridge to drive this engine.
@@ -181,7 +188,7 @@ For the default synthesized kick/snare/hat/stab bank:
 taskset -c 0 ./realtime/build/cv-daw-engine
 ```
 
-The miniaudio context is explicitly ALSA-only, device `hw:0,0`, callback format
+On Linux the miniaudio context is explicitly ALSA-only, device `hw:0,0`, callback format
 f32, 48 kHz stereo, 128 frames and two periods. Native integer sample-format
 conversion is permitted for codecs lacking f32; native sample rate, channels,
 period length and period count must match exactly or startup fails. There is no
@@ -264,7 +271,8 @@ samples per sixteenth (`48000*15/BPM`). Quarter-note beat semantics assume 4/4.
 The engine does not perform motion-to-grid early/late quantization; that policy
 belongs in the producer, which supplies target frames.
 
-Controls are read atomically once per block, then smoothed per sample: cutoff
+Controls are read atomically once per block, then smoothed per sample, including
+per-limb gains 0..1 in ABI version 2. Other parameters: cutoff
 20..18000 Hz, send 0..1, bend -12..12 semitones, BPM 60..200, energy 0..1, stem
 volumes 0..1. Filter low/band/high outputs are available; the engine uses lowpass.
 Reverb uses two fixed cross-coupled comb delays. The rational master saturator
@@ -293,7 +301,9 @@ any syscall (exit is allowed only to finish the test). This is runtime evidence
 for the exercised paths, not a formal WCET proof. A Python/C++ process test runs
 the mock sender against the real offline engine and requires acknowledgments.
 
-No board is connected here. Host tests cannot prove Cortex-A35 WCET, ALSA XRUN
+CoreAudio has been exercised on the development Mac; camera access and video-based
+composition were also tested (see the Spanish implementation report).
+No STM32 board is connected here. Host tests cannot prove Cortex-A35 WCET, ALSA XRUN
 behavior, driver timestamps or <35 ms physical motion-to-sound latency. Measure
 all of those on STM32MP257F-DK under simultaneous camera/NPU/stem/thermal stress.
 The renderer deliberately has no wall-clock calls; use an external profiler or

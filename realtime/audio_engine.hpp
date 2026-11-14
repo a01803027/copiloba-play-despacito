@@ -41,6 +41,7 @@ class AudioEngine {
  std::array<std::array<CytomicSvf,2>,4> filters_{};
  std::array<OnePoleSmoother,4> cutoff_{{OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000)}};
  std::array<OnePoleSmoother,4> send_{},bend_{};
+ std::array<OnePoleSmoother,4> gain_{{OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1)}};
  std::array<OnePoleSmoother,4> volume_{{OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f)}};
  OnePoleSmoother bpm_{120,50},energy_{.5f,20};
  Reverb reverb_;PendingCommands pending_;
@@ -83,8 +84,9 @@ public:
  void processBlock(float* output,uint32_t frame_count)noexcept{
   if(!output || frame_count>block_frames)return;
   auto& controls=shared_.controls;
-  std::array<float,4> fc{},rs{},pb{},sv{};
+  std::array<float,4> fc{},rs{},pb{},sv{},lg{};
   for(unsigned l=0;l<4;++l){
+   lg[l]=bounded(controls.limb_gain[l].load(std::memory_order_relaxed),0,1,0);
    fc[l]=bounded(controls.limb_filter_cutoff[l].load(std::memory_order_relaxed),20,18000,8000);
    rs[l]=bounded(controls.limb_reverb_send[l].load(std::memory_order_relaxed),0,1,0);
    pb[l]=bounded(controls.limb_pitch_bend[l].load(std::memory_order_relaxed),-12,12,0);
@@ -117,6 +119,7 @@ public:
     float cutoff=cutoff_[l].next(fc[l]),send=send_[l].next(rs[l]),bend=tables_.bend(bend_[l].next(pb[l]));
     auto bus=voices_[l].next(tables_,bend);filters_[l][0].coefficients(cutoff);filters_[l][1].coefficients(cutoff);
     bus.l=filters_[l][0].next(bus.l).low;bus.r=filters_[l][1].next(bus.r).low;
+    float limb_gain=gain_[l].next(lg[l]);bus.l*=limb_gain;bus.r*=limb_gain;
     master.l+=bus.l;master.r+=bus.r;reverb_in.l+=bus.l*send;reverb_in.r+=bus.r*send;
    }
    auto wet=reverb_.next(reverb_in);master.l+=wet.l*.25f;master.r+=wet.r*.25f;

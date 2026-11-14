@@ -10,7 +10,13 @@
 #include <xmmintrin.h>
 #endif
 namespace cv_daw {
-inline int lock_process_memory()noexcept{return mlockall(MCL_CURRENT|MCL_FUTURE)==0?0:errno;}
+inline int lock_process_memory()noexcept{
+#ifdef __linux__
+ return mlockall(MCL_CURRENT|MCL_FUTURE)==0?0:errno;
+#else
+ return ENOTSUP; // macOS live playback uses CoreAudio, not Linux RT policy.
+#endif
+}
 inline void flush_subnormals()noexcept{
 #if defined(__aarch64__)
  uint64_t fpcr;asm volatile("mrs %0, fpcr":"=r"(fpcr));

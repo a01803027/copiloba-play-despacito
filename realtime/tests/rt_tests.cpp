@@ -68,6 +68,12 @@ int main(){
   for(unsigned i=0;i<1000;++i)voice.next(*tables,1);CHECK(voice.active);voice.off();for(unsigned i=0;i<6000;++i)voice.next(*tables,1);CHECK(!voice.active);}
  {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();bus->enabled.store(1);StemFrame f;f.stem[0]={1000,-1000};for(unsigned i=0;i<128;++i)CHECK(bus->frames.try_push(f));AudioEngine e(*local,*tables,{},*bus);e.processBlock(output.data(),128);
   for(unsigned i=0;i<128;++i){CHECK(output[2*i]<=1&&output[2*i]>=-1);CHECK(output[2*i+1]<=1&&output[2*i+1]>=-1);}CHECK(local->telemetry.stem_starved_frames.load()==0);}
+ {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();AudioEngine e(*local,*tables,{},*bus);
+  local->commands.try_push({LimbID::L_ARM,EventType::NOTE_ON,60,0,1,0});
+  local->controls.limb_gain[0].store(0);
+  for(unsigned i=0;i<100;++i){no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;}
+  for(float value:output)CHECK(std::abs(value)<1e-6f);
+ }
 #ifdef __linux__
  // Kernel-enforced zero-system-call test, including libc/vDSO-fallback paths.
  // All allocation, libc warmup and fork happen BEFORE installing the filter.

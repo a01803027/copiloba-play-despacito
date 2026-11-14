@@ -1,0 +1,163 @@
+{
+  "environment": {
+    "branch": "tuve-un-sueno",
+    "architecture": "arm64",
+    "detected_gpu_renderer": "Apple M4",
+    "python": "3.11.18",
+    "note": "Observaciones locales; no validaci\u00f3n STM32 ni confirmaci\u00f3n auditiva humana."
+  },
+  "ctest": {
+    "passed": 5,
+    "failed": 0,
+    "seconds": 4.99
+  },
+  "python_unittest": {
+    "passed": 11,
+    "failed": 0
+  },
+  "test_A": {
+    "status": "pass con adaptadores de prueba",
+    "original_main": true,
+    "video_frames": 30,
+    "physical_camera": false,
+    "audio": "SDL dummy"
+  },
+  "test_D_demo": {
+    "backend": "CoreAudio",
+    "seconds": 3,
+    "callback_mean_us": 25.7696,
+    "callback_max_us": 31.476,
+    "callbacks": 1126,
+    "physical_hearing_confirmed": false
+  },
+  "mock-live": {
+    "mode": "mock",
+    "seconds": 10.01875845901668,
+    "processed_frames": 271,
+    "processed_fps": 27.049259756941787,
+    "camera_frames": null,
+    "max_python_processing_ms": 0.8192500099539757,
+    "ipc_roundtrip_ms": [
+      2.085917,
+      0.35
+    ],
+    "events_sent": 78,
+    "note_ons": 43,
+    "energy_min": 0.3500027846339171,
+    "energy_max": 0.8965935212115725,
+    "command_drops": 0,
+    "invalid_commands": 0,
+    "late_commands": 0,
+    "scheduler_overflows": 0,
+    "composer_skipped_ticks": 0,
+    "callback_count": 3760,
+    "callback_mean_us": 23.712167553191488,
+    "callback_max_us": 34.242999999999995,
+    "physical_camera_verified": false,
+    "physical_sound_verified": false
+  },
+  "mock-record": {
+    "mode": "mock",
+    "seconds": 12.010942500084639,
+    "processed_frames": 327,
+    "processed_fps": 27.225174044226396,
+    "tracked_frames": 327,
+    "camera_frames": null,
+    "max_python_processing_ms": 0.4503750242292881,
+    "ipc_roundtrip_ms": [
+      1.561292,
+      1.368458
+    ],
+    "events_sent": 101,
+    "note_ons": 57,
+    "energy_min": 0.3500030884409486,
+    "energy_max": 0.8964712264836964,
+    "command_drops": 0,
+    "invalid_commands": 0,
+    "late_commands": 0,
+    "scheduler_overflows": 0,
+    "composer_skipped_ticks": 0,
+    "callback_count": 0,
+    "callback_mean_us": null,
+    "callback_max_us": null,
+    "physical_camera_verified": false,
+    "physical_sound_verified": false
+  },
+  "camera-live": {
+    "mode": "camera",
+    "seconds": 3.0267483750358224,
+    "processed_frames": 45,
+    "processed_fps": 14.867440045942839,
+    "tracked_frames": 0,
+    "camera_frames": 45,
+    "max_python_processing_ms": 851.3902080012485,
+    "ipc_roundtrip_ms": [
+      3.791458,
+      1.823875
+    ],
+    "events_sent": 6,
+    "note_ons": 0,
+    "energy_min": 0.0,
+    "energy_max": 0.0,
+    "command_drops": 0,
+    "invalid_commands": 0,
+    "late_commands": 0,
+    "scheduler_overflows": 0,
+    "composer_skipped_ticks": 1,
+    "callback_count": 1140,
+    "callback_mean_us": 16.57802807017544,
+    "callback_max_us": 23.851,
+    "physical_camera_verified": true,
+    "physical_sound_verified": false
+  },
+  "video": {
+    "mode": "video",
+    "seconds": 6.010484832921065,
+    "processed_frames": 163,
+    "processed_fps": 27.119276486183697,
+    "tracked_frames": 163,
+    "camera_frames": null,
+    "max_python_processing_ms": 38.61045802477747,
+    "ipc_roundtrip_ms": [
+      1.340583,
+      2.604333
+    ],
+    "events_sent": 33,
+    "note_ons": 16,
+    "energy_min": 0.0,
+    "energy_max": 0.4932339842882191,
+    "command_drops": 0,
+    "invalid_commands": 0,
+    "late_commands": 0,
+    "scheduler_overflows": 0,
+    "composer_skipped_ticks": 0,
+    "callback_count": 0,
+    "callback_mean_us": null,
+    "callback_max_us": null,
+    "physical_camera_verified": false,
+    "physical_sound_verified": false
+  },
+  "wav": {
+    "dsp-audition": {
+      "seconds": 8.0,
+      "rate": 48000,
+      "channels": 2,
+      "peak": 0.148223876953125,
+      "rms": 0.03118879405560144
+    },
+    "contemporary-ambient": {
+      "seconds": 12.016,
+      "rate": 48000,
+      "channels": 2,
+      "peak": 0.120819091796875,
+      "rms": 0.01463658812114378
+    },
+    "video-composition": {
+      "seconds": 6.018666666666666,
+      "rate": 48000,
+      "channels": 2,
+      "peak": 0.041290283203125,
+      "rms": 0.0065775601180913705
+    }
+  }
+}
