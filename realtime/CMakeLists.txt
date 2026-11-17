@@ -72,3 +72,10 @@ if(CV_DAW_BUILD_AUDIO AND Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING
  add_test(NAME composer_ipc COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_composer_ipc.py $<TARGET_FILE:cv-daw-engine> $<TARGET_FILE:cv_daw_ipc>)
  set_tests_properties(composer_ipc PROPERTIES RUN_SERIAL TRUE TIMEOUT 20)
 endif()
+
+if(CV_DAW_BUILD_AUDIO AND Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
+ add_test(NAME performance_modules COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests)
+ set_tests_properties(performance_modules PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+ add_test(NAME performance_ipc COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_performance_ipc.py $<TARGET_FILE:cv-daw-engine> $<TARGET_FILE:cv_daw_ipc>)
+ set_tests_properties(performance_ipc PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/.. RUN_SERIAL TRUE TIMEOUT 20)
+endif()

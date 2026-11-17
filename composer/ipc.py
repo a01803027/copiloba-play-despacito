@@ -37,7 +37,7 @@ class Bridge:
         return self.native.cv_daw_metric(self.pointer,index)
 
     def send(self,event):
-        command=AudioCommand(event.limb,event.kind,event.note,0,event.value,event.frame)
+        command=AudioCommand(event.limb,event.kind,event.note,getattr(event,'flags',0),event.value,event.frame)
         result=self.native.cv_daw_push(self.pointer,C.byref(command),self.token)
         if result!=1:
             raise RuntimeError(f'Cola IPC rechazada ({result}); detener para evitar pérdida silenciosa.')
@@ -48,6 +48,10 @@ class Bridge:
             for limb,value in enumerate(values[key]):
                 if not self.native.cv_daw_control(self.pointer,group,limb,value,self.token):
                     raise RuntimeError(f'Control {key} rechazado; recompila la biblioteca IPC.')
+        if 'stem_volumes' in values:
+            for limb,value in enumerate(values['stem_volumes']):
+                if not self.native.cv_daw_control(self.pointer,5,limb,value,self.token):
+                    raise RuntimeError('Control de stem rechazado')
         for group,key in ((3,'bpm'),(4,'energy')):
             if not self.native.cv_daw_control(self.pointer,group,0,values[key],self.token):
                 raise RuntimeError('Control global rechazado')

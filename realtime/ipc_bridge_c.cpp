@@ -55,6 +55,7 @@ uint64_t cv_daw_metric(void* memory,uint32_t index){
  case 10:return t.callback_sum_ticks.load(std::memory_order_relaxed);
  case 11:return t.callback_max_ticks.load(std::memory_order_relaxed);
  case 12:return t.counter_frequency.load(std::memory_order_relaxed);
+ case 13:return t.grid_snapshot.load(std::memory_order_acquire);
  default:return 0;
  }
 }

@@ -2,10 +2,10 @@
 
 ## Qué vas a conseguir
 
-Primero escucharás una composición controlada por movimiento simulado. Después
-usarás la cámara para influir con tu cuerpo. La composición usa Do menor, motivos
-repetidos y reglas de energía, fluidez y expansión: no una nota por franja de altura.
-
+La ruta principal es el instrumento de cuatro extremidades. Los golpes en el
+aire disparan notas o percusión y los gestos de mano controlan cada pista.
+Puedes mezclar cuatro pistas de una canción a tempo fijo. El compositor
+Contemporary Ambient sigue disponible en `composer.app`.
 Los archivos de Mili siguen intactos. También puedes ejecutar su prueba aparte.
 Esta guía es para **macOS Apple Silicon**. No copies aquí los comandos de permisos
 Linux ni uses `sudo` para arrancar el motor.
@@ -144,8 +144,8 @@ cmake -S realtime -B realtime/build-mac -DCMAKE_BUILD_TYPE=Release -DCV_DAW_WITH
 ```
 
 Prepara un build específico del Mac en `realtime/build-mac`. Usa el Python del
-entorno para las pruebas. Desactiva los stems/Rubber Band porque no hacen falta
-para la primera composición. No pongas `CV_DAW_CORTEX_A35=ON` en el Mac.
+entorno para las pruebas. Desactiva el estiramiento Rubber Band. La reproducción de stems a tempo fijo
+sigue disponible en el instrumento. No pongas `CV_DAW_CORTEX_A35=ON` en el Mac.
 
 ```sh
 cmake --build realtime/build-mac --parallel 2
@@ -160,7 +160,72 @@ ctest --test-dir realtime/build-mac --output-on-failure
 
 Ejecuta las pruebas de DSP, conexión Python/C++, WAV y reglas musicales.
 No tengas otro motor abierto mientras corren: usan la misma memoria compartida.
-El resultado esperado de esta versión es **5 pruebas aprobadas**.
+El resultado esperado de esta versión es **7 pruebas aprobadas**.
+
+## Instrumento y remezcla de cuatro extremidades
+
+Activa `.venv-mac` y compila como en los pasos anteriores. El motor y el puente
+deben compilarse juntos para usar el ABI 3. Elige los altavoces integrados en
+**Ajustes del Sistema → Sonido** y cierra otros procesos CV-DAW antes de abrir
+una sesión.
+
+```sh
+python -m composer.performance --mode mock --seconds 8
+```
+
+Inicia CoreAudio y simula golpes para las cuatro pistas. Debes ver
+`audio-ready backend=CoreAudio` y un número de golpes para cada extremidad al
+terminar. Puedes confirmar de oído que salen notas y percusión.
+
+```sh
+python -m composer.performance --metrics artifacts/instrumento-camara.json
+```
+
+Abre la webcam integrada, muestra la vista de pose y conecta el instrumento.
+Si macOS pide acceso a la cámara, autorízalo para Terminal o la aplicación que
+inicia Python. Deja espacio para ver de hombros a tobillos. Haz movimientos con
+una frenada marcada para disparar. El orden de pistas en la pantalla es brazo
+izquierdo, brazo derecho, pierna izquierda y pierna derecha. Pulsa **q** en la
+ventana o **Control+C** en Terminal para salir. `--camera N` permite elegir el
+índice manualmente. `--no-window` ejecuta la misma inferencia sin vista.
+
+- Puño alterna el silencio. Pinza con los otros dedos extendidos alterna la
+  repetición del patrón grabado. La V cambia de preset. Abre la mano entre dos
+  repeticiones del mismo gesto. Con `--stationary-leg-modifier` el gesto también
+  afecta la pierna del mismo lado si está visible y quieta.
+- Los brazos usan la escala menor pentatónica por omisión. Las piernas
+  disparan caja izquierda y bombo derecho. `--scale dorian` selecciona Do dórico.
+- Para examinar el rastreo sin iniciar audio, ejecuta
+  `python -m perception_layer`. Muestra los índices anatómicos, altura cruda y
+  filtrada, y FPS de proceso.
+
+```sh
+python -m composer.performance --mode mock --seconds 8 --bpm 120 --stems bateria.wav bajo.wav voz.wav otros.wav
+```
+
+Sustituye los nombres por cuatro WAV alineados, de la misma duración, con el
+primer pulso al principio y un final de bucle apropiado. `--bpm` indica su BPM
+real. El programa ajusta los niveles de batería, bajo, voz y otros a partir de
+groove y energía. Cada archivo se repite completo. Quita `--mode mock --seconds
+8` para controlar la mezcla con la cámara. `--follow-bounce` habilita el seguimiento
+opcional de tempo. Si se combina con stems, requiere un build con Rubber Band
+activado. La demo de tempo fijo funciona con el build indicado arriba.
+
+```sh
+python -m composer.performance --mode video --video brazo.mp4 --offline-audio --record artifacts/instrumento-video.wav --no-window
+```
+
+Reproduce el vídeo de referencia a su cadencia, ejecuta el IPC y guarda un WAV
+sin abrir CoreAudio. Es una prueba de tren superior. Para probar las piernas
+usa el mock de cuatro extremidades o una toma de cuerpo completo.
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+Ejecuta las pruebas de los tres módulos y las regresiones Python. CTest,
+descrito arriba, incluye además pruebas de cuantización nativa e integración
+offline con stems.
 
 ## 5. Ejecuta la prueba original de Mili, si quieres compararla
 

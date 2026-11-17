@@ -11,3 +11,5 @@ djvision/
 
 .venv-mac/
 artifacts/
+
+/docs/TEST_RESULTS.json

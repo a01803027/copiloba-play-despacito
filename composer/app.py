@@ -19,6 +19,14 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def start_engine(args):
     command=[str(Path(args.engine).resolve()),'--profile']
+    if getattr(args, 'performance', False):
+        command += ['--performance', str(args.bpm)]
+        if args.stems and args.follow_bounce:
+            command += ['--stretch-stems']
+        if args.stems:
+            command += ['--stems', str(args.bpm), *(str(Path(stem).resolve()) for stem in args.stems)]
+        if args.samples:
+            command += ['--samples', *(str(Path(sample).resolve()) for sample in args.samples)]
     if args.offline_audio:
         command+=['--offline',str(math.ceil((args.seconds+5 if args.seconds else 3600)*375))]
         if args.record:
@@ -51,15 +59,23 @@ def start_engine(args):
 
 
 class LatestCamera:
-    def __init__(self,cv2,index):
+    def __init__(self,cv2,index, *, fps=30, pipeline=None):
         self.cv2=cv2
-        self.cap=cv2.VideoCapture(index,cv2.CAP_AVFOUNDATION) if sys.platform=='darwin' else cv2.VideoCapture(index)
+        if pipeline:
+            self.cap=cv2.VideoCapture(pipeline,cv2.CAP_GSTREAMER)
+        elif sys.platform=='darwin':
+            self.cap=cv2.VideoCapture(index,cv2.CAP_AVFOUNDATION)
+        else:
+            self.cap=cv2.VideoCapture(index)
         if not self.cap.isOpened():
             self.cap.release()
             raise RuntimeError('No se pudo abrir la cámara. Revisa permisos de Cámara para Terminal y cierra otras apps.')
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,480)
-        self.cap.set(cv2.CAP_PROP_FPS,30)
+        if not pipeline:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,480)
+            self.cap.set(cv2.CAP_PROP_FPS,fps)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+        self.negotiated_fps=self.cap.get(cv2.CAP_PROP_FPS)
         self.frames=queue.Queue(maxsize=1)
         self.stop=threading.Event()
         self.count=0

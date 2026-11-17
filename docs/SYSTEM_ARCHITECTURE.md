@@ -1,6 +1,82 @@
-# Arquitectura integrada: Contemporary Ambient
+# Arquitectura integrada del CV-DAW
 
-## Qué hace el instrumento
+## Instrumento de cuatro extremidades y remezcla
+
+`python -m composer.performance` inicia la ruta principal en modo cámara.
+También acepta vídeo o señal sintética para repetir pruebas.
+
+```mermaid
+flowchart LR
+    A[Cámara o vídeo] --> B[Percepción]
+    B --> C[Cinemática por extremidad]
+    B --> D[Trabajador temporal]
+    C --> E[Cerebro musical]
+    D --> E
+    E --> F[Puente C y memoria POSIX]
+    F --> G[Motor C++20]
+    H[Worker de stems] --> G
+    G --> I[CoreAudio o ALSA]
+    G -->|contador y rejilla| E
+```
+
+- `PerceptionFrame` lleva una marca monotónica de entrega, los 33 landmarks
+  crudos con visibilidad, ambas manos crudas, coordenadas de manos filtradas,
+  pose torso-relativa filtrada y altura de cadera en coordenadas de imagen
+  corregidas por aspecto. El filtro One Euro usa el intervalo observado.
+  La pérdida de pose reinicia el filtro y se reinician las coordenadas que
+  vuelven a adquirir visibilidad.
+- `FastKinematicsExtractor` mide velocidad y aceleración de 15, 16, 27 y 28,
+  detecta frenadas y calcula altura, radio y flexión. Un solo trabajador
+  procesa el contexto a partir de frames recientes. Remuestrea a 60 Hz para
+  analizar 30 muestras de velocidad y 180 de altura de cadera. Las
+  probabilidades proceden del modelo opcional o de reglas deterministas.
+- `MusicalBrain` genera `AudioCommand` y `ControlFrame`. Un productor
+  transmite eventos discretos al SPSC y controles atómicos por canal.
+  El motor lee los controles por bloque. Los cuatro stems prealineados
+  comparten cursor en tempo fijo, pasan por el FIFO existente y mantienen
+  las ganancias suavizadas. El looper de instrumentos repite los golpes
+  grabados en 32 semicorcheas. Cada stem repite su archivo completo.
+- El ABI 3 mantiene los comandos de 16 bytes. Añade un flag de grabación en
+  el pulso anterior y la métrica 13, que empaqueta el siguiente frame de
+  rejilla y la distancia en muestras desde el anterior. El motor fija el
+  siguiente tramo de tempo en cada tick. Python lee el contador renderizado
+  para elegir entre salida inmediata y un `target_frame` futuro. El audio
+  ejecuta los comandos que llegan a tiempo en su frame. Un comando tardío
+  se contabiliza y se ejecuta al estar disponible. El contador no incluye
+  exposición, latencia al DAC ni la propagación acústica.
+
+### OpenSTLinux y modelos
+
+`--device /dev/videoN --exposure VALOR` selecciona V4L2/GStreamer, comprueba
+la obturación manual con `v4l2-ctl` y solicita 640×480 a 60 FPS. OpenCV debe
+incluir GStreamer y el sensor debe soportar ese modo y exponer los controles
+conocidos. Hay una cola de un cuadro en GStreamer y otra de entrega en Python.
+La ruta Mac usa AVFoundation con la webcam integrada. Su frecuencia y
+exposición dependen del dispositivo. El tiempo Python se toma al recibir la
+imagen, por lo que no identifica el inicio de exposición.
+
+Para OpenSTLinux, usa Python 3.10 o posterior con NumPy y MediaPipe Solutions
+para el fallback de CPU. Compila `realtime/` con el SDK y
+`CV_DAW_CORTEX_A35=ON`. El DSP puede usar ALSA y el motor y el puente deben
+pertenecer al mismo build. El modo de grabación offline evita el dispositivo.
+
+`--pose-model MODELO.tflite --pose-delegate BIBLIOTECA.so` admite un grafo
+completo con entrada RGB NHWC `[1,H,W,3]` en [0,1] y salidas
+`[1,33,4]`, `[1,2,21,3]` y `[1,2]`. Las manos van en orden izquierda,
+derecha anatómicas y las puntuaciones de presencia usan el umbral 0.5.
+El grafo debe incluir la detección y entregar coordenadas relativas al
+cuadro de entrada. También se admite `--pose-backend MODULO` con el contrato
+`create_backend().infer(rgb)` de `perception/run.py`. Un fallo de inicialización
+o invocación cambia a MediaPipe CPU. La distribución del proyecto no incluye
+un grafo de pose/manos compilado para VeriSilicon ni su biblioteca.
+
+`--groove-model MODELO` admite TFLite u ONNX con entrada float o cuantizada
+por tensor en TFLite, forma `[1,30,36]`, y cuatro logits en orden BOUNCE,
+FLOW, STACCATO, IDLE. `--delegate` es el delegado opcional del modelo temporal.
+La heurística es el modo base. El seguimiento de rebote es optativo y la
+canción mantiene su BPM explícito por defecto.
+
+## Demo generativa Contemporary Ambient
 
 La persona no selecciona cada nota. Su movimiento cambia las condiciones de una
 composición: cuánta actividad tiene, qué tan abierta o tensa resulta, qué registro
@@ -123,7 +199,7 @@ comprobar la composición y se desactivan en el primer build de Mac.
 
 ## Comunicación y tiempo
 
-El ABI integrado es **versión 2**. Se añadió `limb_gain[4]` para controlar dinámica
+El ABI compartido actual es **versión 3**. Se añadió `limb_gain[4]` para controlar dinámica
 sin simular miles de NOTE_ON. La biblioteca y el ejecutable se deben recompilar
 juntos. Los comandos siguen midiendo 16 bytes y la cola sigue teniendo 256 entradas.
 

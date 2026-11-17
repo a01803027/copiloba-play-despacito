@@ -93,25 +93,29 @@ struct Unlock {bool locked=false;~Unlock(){if(locked)munlockall();}};
 }
 int main(int argc,char** argv){try{
  signal(SIGINT,stop);signal(SIGTERM,stop);
- const char* render_path=nullptr;bool demo=false,profile=false;double seconds=0;
- const char* sample_paths[4]{};const char* stem_paths[4]{};double source_bpm=120;unsigned offline_blocks=0;
+ const char* render_path=nullptr;bool demo=false,profile=false,performance=false,stretch_stems=false;double seconds=0;
+ const char* sample_paths[4]{};const char* stem_paths[4]{};double source_bpm=120,initial_bpm=120;unsigned offline_blocks=0;
  for(int i=1;i<argc;++i){std::string option=argv[i];
   if(option=="--render" && i+1<argc)render_path=argv[++i];
   else if(option=="--seconds" && i+1<argc){seconds=std::stod(argv[++i]);if(!(seconds>0&&seconds<=3600))throw std::runtime_error("seconds fuera de rango");}
+  else if(option=="--performance" && i+1<argc){performance=true;initial_bpm=std::stod(argv[++i]);
+   if((std::bit_cast<uint64_t>(initial_bpm)&0x7ff0000000000000ull)==0x7ff0000000000000ull || initial_bpm<60 || initial_bpm>200)throw std::runtime_error("performance BPM must be 60..200");}
+  else if(option=="--stretch-stems")stretch_stems=true;
   else if(option=="--demo")demo=true;
   else if(option=="--profile")profile=true;
   else if(option=="--offline" && i+1<argc)offline_blocks=unsigned(std::stoul(argv[++i]));
   else if(option=="--samples" && i+4<argc)for(auto& p:sample_paths)p=argv[++i];
   else if(option=="--stems" && i+5<argc){source_bpm=std::stod(argv[++i]);for(auto& p:stem_paths)p=argv[++i];}
-  else throw std::runtime_error("usage: cv-daw-engine [--samples kick.wav snare.wav hat.wav stab.wav] [--stems BPM drums.wav bass.wav vocals.wav other.wav] [--offline BLOCKS]");
+  else throw std::runtime_error("usage: cv-daw-engine [--performance BPM] [--samples kick.wav snare.wav hat.wav stab.wav] [--stems BPM drums.wav bass.wav vocals.wav other.wav] [--stretch-stems] [--offline BLOCKS]");
  }
  if((std::bit_cast<uint64_t>(source_bpm)&0x7ff0000000000000ull)==0x7ff0000000000000ull)throw std::runtime_error("source BPM must be finite");
  auto assets=std::make_unique<Assets>();for(unsigned i=0;i<4;++i)if(sample_paths[i])assets->samples[i]=load_wav(sample_paths[i],sample_rate*15);
  SharedMemoryMapping mapping(true);auto& shared=mapping.get();auto stems=std::make_unique<StemBus>();
+ shared.controls.target_bpm.store(float(initial_bpm));stems->requested_bpm.store(float(initial_bpm));
  std::unique_ptr<StemWorker> worker;
  if(stem_paths[0]){std::array<std::vector<float>,4> data;for(unsigned i=0;i<4;++i)data[i]=load_wav(stem_paths[i],uint64_t(sample_rate)*60*15);
-  worker=std::make_unique<StemWorker>(*stems,std::move(data),source_bpm);worker->wait_for_prebuffer();}
- auto engine=std::make_unique<AudioEngine>(shared,assets->tables,assets->views(),*stems);
+  worker=std::make_unique<StemWorker>(*stems,std::move(data),source_bpm,initial_bpm,performance&&!stretch_stems);worker->wait_for_prebuffer();}
+ auto engine=std::make_unique<AudioEngine>(shared,assets->tables,assets->views(),*stems,performance);
  if(demo)shared.header.producer_claim.store(uint32_t(getpid()),std::memory_order_release);
  uint64_t last_demo_beat=UINT64_MAX;
  auto demo_step=[&]{

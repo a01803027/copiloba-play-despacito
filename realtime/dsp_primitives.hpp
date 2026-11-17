@@ -86,10 +86,10 @@ public:
 };
 struct Voice {
  Adsr envelope;SampleView sample{};float phase=0,increment=0,gain=0;double sample_position=0;
- uint32_t age=0;uint8_t note=0,band=0;bool active=false,is_sample=false,is_sine=false;
+ uint32_t age=0,noise=1;uint8_t note=0,band=0,drum=0;bool active=false,is_sample=false,is_sine=false;
  void start(uint8_t n,float velocity,unsigned preset,const Wavetables& tables,SampleView asset)noexcept{
   note=n;phase=0;sample_position=0;age=0;increment=tables.increments[n];band=uint8_t(tables.band_for(increment));
-  gain=velocity;is_sample=preset>=2;is_sine=preset==1;sample=asset;active=!is_sample || (sample.samples && sample.frames);envelope.on();
+  gain=velocity;drum=preset>=6?uint8_t(preset-5):0;noise=1;is_sample=preset>=2 && preset<6;is_sine=preset==1;sample=asset;active=!is_sample || (sample.samples && sample.frames);envelope.on();
  }
  void off()noexcept{envelope.off();}
  Stereo next(const Wavetables& tables,float bend_ratio)noexcept{
@@ -102,6 +102,16 @@ struct Voice {
    auto read=[&](unsigned channel){unsigned c=sample.channels==1?0:channel;float a=sample.samples[i*sample.channels+c],b=sample.samples[j*sample.channels+c];return a+(b-a)*frac;};
    out={read(0)*gain*env,read(1)*gain*env};sample_position+=bend_ratio;
    if(!envelope.active())active=false;
+  }else if(drum){
+   constexpr unsigned duration=sample_rate/5;
+   float tail=1-float(age)/duration;
+   noise^=noise<<13;noise^=noise>>17;noise^=noise<<5;
+   float tone=tables.oscillator(phase,band,true);
+   float white=float(noise>>8)*(2.f/16777216.f)-1;
+   float value=(drum==1?tone:.75f*white+.25f*tone)*tail*tail*gain*.55f;
+   out={value,value};
+   phase+=increment*bend_ratio*(1+tail*tail*(drum==1?3:1));phase-=unsigned(phase);
+   if(age+1==duration)active=false;
   }else{
    float value=tables.oscillator(phase,band,is_sine)*env*gain*.18f;out={value,value};
    phase+=std::min(increment*bend_ratio,.45f);if(phase>=1)phase-=1;

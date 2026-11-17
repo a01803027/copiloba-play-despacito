@@ -62,6 +62,35 @@ int main(){
   local->controls.target_bpm.store(200);local->controls.limb_filter_cutoff[0].store(std::bit_cast<float>(0x7fc00000u));
   for(unsigned i=0;i<1000;++i){no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;for(float value:output)CHECK(finite(value)&&std::abs(value)<=1);}
   CHECK(std::abs(e.samples_per_sixteenth()-3600)<.1);}
+ {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();AudioEngine e(*local,*tables,{},*bus,true);
+  local->controls.target_bpm.store(137);
+  e.processBlock(output.data(),128);
+  auto target=local->telemetry.grid_snapshot.load()>>16;
+  CHECK(target==5255);
+  CHECK(local->commands.try_push({LimbID::R_LEG,EventType::PRESET_CHANGE,6,0,0,0}));
+  CHECK(local->commands.try_push({LimbID::R_LEG,EventType::NOTE_ON,36,0,1,target}));
+  // A tempo command inside this tick takes effect at the published boundary.
+  local->controls.target_bpm.store(100);
+  uint64_t first_sound=0;
+  while(e.total_samples_rendered()<target+128){
+   auto start=e.total_samples_rendered();e.processBlock(output.data(),128);
+   for(unsigned i=0;i<128;++i)if(!first_sound&&std::abs(output[2*i])>1e-6f)first_sound=start+i;
+  }
+  CHECK(first_sound==target+1);
+  CHECK((local->telemetry.grid_snapshot.load()>>16)==12455);
+  CHECK(local->telemetry.late_commands.load()==0);
+  CHECK(valid({LimbID::R_LEG,EventType::NOTE_ON,36,record_previous_grid,1,0}));
+  CHECK(!valid({LimbID::R_LEG,EventType::NOTE_ON,36,record_previous_grid,1,100}));
+ }
+ {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();AudioEngine e(*local,*tables,{},*bus,true);
+  CHECK(local->commands.try_push({LimbID::L_ARM,EventType::PRESET_CHANGE,6,0,0,0}));
+  while(e.total_samples_rendered()<4096)e.processBlock(output.data(),128);
+  CHECK(local->commands.try_push({LimbID::L_ARM,EventType::NOTE_ON,36,record_previous_grid,1,0}));
+  CHECK(local->commands.try_push({LimbID::L_ARM,EventType::LOOP_LOCK,0,0,1,0}));
+  e.processBlock(output.data(),128);CHECK(std::abs(output[2])>1e-6f);
+  while(e.total_samples_rendered()<192128)e.processBlock(output.data(),128);
+  CHECK(std::abs(output[2])>1e-6f);
+ }
  {PendingCommands pending;for(unsigned i=0;i<256;++i)CHECK(pending.push({LimbID::L_ARM,EventType::NOTE_ON,60,0,1,256-i}));CHECK(!pending.push({}));AudioCommand c;for(unsigned i=1;i<=256;++i)CHECK(pending.pop_due(i,c)&&c.target_frame==i);}
  {PendingCommands pending;for(unsigned i=0;i<32;++i)CHECK(pending.push({LimbID::L_ARM,EventType::NOTE_ON,uint8_t(i),0,1,9}));AudioCommand c;for(unsigned i=0;i<32;++i)CHECK(pending.pop_due(9,c)&&c.note_or_param==i);}
  {std::array<float,10000> sample{};sample.fill(.5f);Voice voice;voice.start(60,1,2,*tables,{sample.data(),uint32_t(sample.size()),1});

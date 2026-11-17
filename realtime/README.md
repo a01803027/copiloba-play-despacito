@@ -1,8 +1,8 @@
 # Modules 4 and 5 — macOS / Cortex-A35 / OpenSTLinux
 
-For the integrated dance composer and beginner macOS instructions, start with
+For the four-limb instrument, dance composer, and macOS instructions, start with
 [MAC_SETUP.md](../MAC_SETUP.md). macOS now uses miniaudio CoreAudio for live audio.
-The producer ABI is version 2, with smoothed per-limb gains (control group 6) and
+The producer ABI is version 3, with smoothed per-limb gains (control group 6) and
 optional callback timing telemetry. Rebuild the native library and engine together.
 The following low-level instructions remain useful for standalone/board work.
 
@@ -255,12 +255,13 @@ pass per block prevents producer floods from extending callback work indefinitel
 
 * NOTE_ON: limb 0..3, MIDI note 0..127, velocity in [0,1]. Allocates a pool voice
   or steals the oldest. Live hits record to the nearest sixteenth-note slot.
+  Flag 1 in byte 3 requests the previous boundary for an immediate note.
 * NOTE_OFF: release matching voices for that limb and note.
 * MUTE_TOGGLE: toggle limb mute and immediately stop its active voices.
 * LOOP_LOCK: value >=0.5 locks, <0.5 unlocks. Locked limbs ignore live NOTE_ON and
   replay their table on sixteenth boundaries. Muting preserves the pattern.
-* PRESET_CHANGE: note_or_param selects preset 0..5; existing voices keep their
-  selected waveform/sample until release.
+* PRESET_CHANGE: note_or_param selects preset 0..7; existing voices keep their
+  selected waveform/sample until release. Presets 6 and 7 synthesize kick and snare.
 * STEM_MUTE: limb MASTER, note_or_param 0..3; toggle that stem mute with smoothing.
 
 Each limb table contains 32 slots and at most eight hits per slot. Live operation
@@ -269,10 +270,12 @@ its last hit. There is no unbounded event list or callback allocation. The sampl
 clock and fractional beat phase preserve tempo continuity; smoothed BPM controls
 samples per sixteenth (`48000*15/BPM`). Quarter-note beat semantics assume 4/4.
 The engine does not perform motion-to-grid early/late quantization; that policy
-belongs in the producer, which supplies target frames.
+belongs in the producer, which supplies target frames. In performance mode
+the engine publishes the next boundary and grid interval as metric 13, with
+tempo changes latched at each grid boundary.
 
 Controls are read atomically once per block, then smoothed per sample, including
-per-limb gains 0..1 in ABI version 2. Other parameters: cutoff
+per-limb gains 0..1. Other parameters: cutoff
 20..18000 Hz, send 0..1, bend -12..12 semitones, BPM 60..200, energy 0..1, stem
 volumes 0..1. Filter low/band/high outputs are available; the engine uses lowpass.
 Reverb uses two fixed cross-coupled comb delays. The rational master saturator

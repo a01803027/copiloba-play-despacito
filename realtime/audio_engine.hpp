@@ -50,8 +50,13 @@ class AudioEngine {
  std::array<uint8_t,4> preset_{{0,1,2,3}};
  uint64_t total_samples_rendered_=0,tick_index_=0,consumed_=0,invalid_=0,late_=0,overflow_=0,ticks_=0,starved_=0;
  double phase_=0;bool first_tick_=true;
+ bool performance_=false;
+ double next_grid_=0,grid_period_=6000;
+ uint64_t current_grid_frame_=0;
+ uint64_t next_grid_frame()const noexcept{return uint64_t(next_grid_+.5);}
  void trigger(unsigned limb,uint8_t note,float velocity)noexcept{
-  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset=p>=2?samples_[p-2]:SampleView{};
+  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset=p>=2&&p<6?samples_[p-2]:SampleView{};
+  if(performance_ && p>=2 && p<6 && !asset.samples)p=limb>=2?6+(limb==2):p%2;
   voices_[limb].note_on(note,velocity,p,tables_,asset);
  }
  void execute(const AudioCommand& c)noexcept{
@@ -63,7 +68,8 @@ class AudioEngine {
    if(c.note_or_param>127 || c.value<0 || c.value>1){++invalid_;break;}
    if(!locked_[l]){
     trigger(l,c.note_or_param,c.value);
-    if(!muted_[l]){unsigned slot=unsigned((tick_index_+(phase_>=.5?1:0))%32);auto& p=patterns_[l][slot];
+    if(!muted_[l]){bool nearest_future=performance_ ? double(total_samples_rendered_)+grid_period_/2>=next_grid_ : phase_>=.5;
+     unsigned slot=unsigned((tick_index_+(c.reserved==record_previous_grid?0:nearest_future))%32);auto& p=patterns_[l][slot];
      if(p.count<p.hits.size())p.hits[p.count++]={c.note_or_param,c.value};else {p.hits.back()={c.note_or_param,c.value};}
     }
    }break;
@@ -71,12 +77,12 @@ class AudioEngine {
   case EventType::NOTE_OFF:voices_[l].note_off(c.note_or_param);break;
   case EventType::MUTE_TOGGLE:muted_[l]=!muted_[l];if(muted_[l])voices_[l].silence();break;
   case EventType::LOOP_LOCK:locked_[l]=c.value>=.5f;break;
-  case EventType::PRESET_CHANGE:if(c.note_or_param<6)preset_[l]=c.note_or_param;else ++invalid_;break;
+  case EventType::PRESET_CHANGE:if(c.note_or_param<8)preset_[l]=c.note_or_param;else ++invalid_;break;
   case EventType::STEM_MUTE:break;
   }
  }
 public:
- AudioEngine(SharedMemory& s,const Wavetables& t,std::array<SampleView,4> samples,StemBus& stems):shared_(s),tables_(t),samples_(samples),stems_(stems){}
+ AudioEngine(SharedMemory& s,const Wavetables& t,std::array<SampleView,4> samples,StemBus& stems,bool performance=false):shared_(s),tables_(t),samples_(samples),stems_(stems),performance_(performance){}
  uint64_t total_samples_rendered()const noexcept{return total_samples_rendered_;}
  double samples_per_sixteenth()const noexcept{return double(sample_rate)*15/bpm_.value();}
  // Pure bounded DSP/atomic memory operations. No clock calls, syscalls, allocators,
@@ -108,8 +114,12 @@ public:
   bool stems_enabled=stems_.enabled.load(std::memory_order_acquire)==1;
   for(unsigned n=0;n<frame_count;++n,++total_samples_rendered_){
    float current_bpm=bpm_.next(bpm),current_energy=energy_.next(energy);
-   bool tick=first_tick_ || phase_>=1-1e-12;
-   if(first_tick_)first_tick_=false;else if(tick){phase_=std::max(0.0,phase_-1);++tick_index_;}
+   bool tick=performance_ ? total_samples_rendered_>=next_grid_frame() : first_tick_ || phase_>=1-1e-12;
+   if(tick){
+    if(first_tick_)first_tick_=false;
+    else {phase_=std::max(0.0,phase_-1);++tick_index_;}
+    if(performance_){current_grid_frame_=total_samples_rendered_;grid_period_=double(sample_rate)*15/bpm;next_grid_+=grid_period_;}
+   }
    while(pending_.pop_due(total_samples_rendered_,command))execute(command);
    if(tick){++ticks_;for(unsigned l=0;l<4;++l)if(locked_[l]){
     auto& slot=patterns_[l][tick_index_%32];for(unsigned j=0;j<slot.count;++j)trigger(l,slot.hits[j].note,slot.hits[j].velocity);
@@ -126,13 +136,14 @@ public:
    StemFrame stems{};if(stems_enabled && !stems_.frames.try_pop(stems))++starved_;
    for(unsigned l=0;l<4;++l){float vol=volume_[l].next(stem_muted_[l]?0:sv[l]);master.l+=stems.stem[l].l*vol;master.r+=stems.stem[l].r*vol;}
    float gain=.4f+.2f*current_energy;output[2*n]=master.l*gain;output[2*n+1]=master.r*gain;
-   phase_+=current_bpm/(sample_rate*15.0);
+   if(!performance_)phase_+=current_bpm/(sample_rate*15.0);
   }
   limit_stereo(output,frame_count);
   auto& t=shared_.telemetry;
   t.commands_consumed.store(consumed_,std::memory_order_relaxed);t.invalid_commands.store(invalid_,std::memory_order_relaxed);
   t.late_commands.store(late_,std::memory_order_relaxed);t.scheduler_overflows.store(overflow_,std::memory_order_relaxed);
   t.sixteenth_ticks.store(ticks_,std::memory_order_relaxed);t.stem_starved_frames.store(starved_,std::memory_order_relaxed);
+  if(performance_)t.grid_snapshot.store((next_grid_frame()<<16)|(next_grid_frame()-current_grid_frame_),std::memory_order_release);
   t.total_samples_rendered.store(total_samples_rendered_,std::memory_order_release);
  }
 };

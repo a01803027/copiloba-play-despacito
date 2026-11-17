@@ -17,13 +17,14 @@
 
 namespace cv_daw {
 inline constexpr char shm_name[]="/cv_daw_shm";
-inline constexpr uint32_t ipc_magic=0x43564457, ipc_version=2, command_capacity=256;
+inline constexpr uint32_t ipc_magic=0x43564457, ipc_version=3, command_capacity=256;
 static_assert(std::endian::native==std::endian::little);
 static_assert(std::atomic<uint32_t>::is_always_lock_free && sizeof(std::atomic<uint32_t>)==4);
 static_assert(std::atomic<uint64_t>::is_always_lock_free && sizeof(std::atomic<uint64_t>)==8);
 static_assert(std::atomic<float>::is_always_lock_free && sizeof(std::atomic<float>)==4);
 enum class LimbID:uint8_t {L_ARM=0,R_ARM=1,L_LEG=2,R_LEG=3,MASTER=4};
 enum class EventType:uint8_t {NOTE_ON=0,NOTE_OFF=1,MUTE_TOGGLE=2,LOOP_LOCK=3,PRESET_CHANGE=4,STEM_MUTE=5};
+inline constexpr uint8_t record_previous_grid=1;
 struct alignas(16) AudioCommand {
  LimbID limb_id{}; EventType event_type{}; uint8_t note_or_param{},reserved{};
  float value{};uint64_t target_frame{};
@@ -72,6 +73,7 @@ struct alignas(64) Telemetry {
  std::atomic<uint64_t> late_commands{0},scheduler_overflows{0},sixteenth_ticks{0},stem_starved_frames{0};
  std::atomic<uint64_t> xruns{0},rendered_peak_bits{0};
  std::atomic<uint64_t> callback_count{0},callback_sum_ticks{0},callback_max_ticks{0},counter_frequency{0};
+ std::atomic<uint64_t> grid_snapshot{0};
 };
 struct alignas(64) SharedMemory {
  IpcHeader header;AtomicControlBlock controls;CommandQueue commands;Telemetry telemetry;
@@ -84,7 +86,7 @@ static_assert(sizeof(SharedMemory)==4544);
 // Bit inspection remains valid with -ffast-math (std::isfinite may be optimized away).
 inline bool finite(float x)noexcept{return (std::bit_cast<uint32_t>(x)&0x7f800000u)!=0x7f800000u;}
 inline bool valid(const AudioCommand& c)noexcept {
- return unsigned(c.limb_id)<=4 && unsigned(c.event_type)<=5 && c.reserved==0 && finite(c.value);
+ return unsigned(c.limb_id)<=4 && unsigned(c.event_type)<=5 && (c.reserved==0 || (c.reserved==record_previous_grid && c.event_type==EventType::NOTE_ON && c.target_frame==0)) && finite(c.value);
 }
 class SharedMemoryMapping {
  int fd_=-1;SharedMemory* p_=nullptr;bool owner_=false;std::string name_;

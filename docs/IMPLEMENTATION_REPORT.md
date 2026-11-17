@@ -1,5 +1,42 @@
 # Informe de implementación y verificación
 
+## Instrumento y remezcla en cuatro extremidades
+
+Se aplicó el [plan de migración](MODULE_MIGRATION_PLAN.md) en `tuve-un-sueno`.
+Se conservaron `BrazoIzquierdo.py`, los recursos de Mili, el modo generativo
+`composer.app` y la ruta histórica de placa.
+
+| Etapa | Cambio y razón | Verificación |
+| --- | --- | --- |
+| Percepción | `perception_layer.py` reutiliza la captura y la referencia MediaPipe. Entrega pose y manos crudas y filtradas, corrige la lateralidad y normaliza por torso. V4L2 verifica obturación manual y AVFoundation pide la cámara integrada. | Filtro, escala, visibilidad, lateralidad y contrato delegado simulado. |
+| Extracción | `feature_extractors.py` separa los disparos del contexto inferido. El contexto usa una ventana resampleada, y los resultados se consumen sin esperar al trabajador. | Trayectorias sintéticas, oclusión, postura, BPM y cadencia variable. La primera prueba a 160 BPM daba 80 BPM. La selección del primer pico fuerte corrigió ese caso. |
+| Cerebro | `musical_brain.py` gestiona estados, escalas, ocho presets, cuantización híbrida y volúmenes de stems. El motor recibe objetivos por muestra, conserva su looper y publica el siguiente pulso por IPC. | Escalas, transiciones, presets, límites de −40 y +35 ms, cambio de tempo en una frontera de muestra, grabación tardía en el slot anterior y mezcla offline. |
+| Integración | `composer.performance` combina los módulos con fuente cámara, vídeo o mock. El ABI 3 se compila en conjunto. El worker existente admite stems alineados a tempo fijo sin Rubber Band. | CTest incluye la regresión del compositor y el nuevo flujo Python → IPC → DSP → WAV con cuatro stems. |
+
+### Mediciones en el Mac Apple Silicon
+
+| Ejecución | Resultado observado |
+| --- | --- |
+| Mock + CoreAudio, 4 s | 240 entradas sintéticas y 53 golpes repartidos 11/12/14/16. CoreAudio informó 48 kHz y bloque de 128. Registró 1515 callbacks, con media 6.74 µs y máximo 10.79 µs del tramo perfilado. Cero pérdidas, rechazos y comandos tardíos. |
+| `brazo.mp4` + DSP offline | 300 cuadros procesados a 30.01 FPS, 225 poses con torso válido y dos golpes en el brazo izquierdo. Se generó `artifacts/performance-video.wav` con cero pérdidas, rechazos o tardíos. El vídeo está recortado y esta ejecución no valida las piernas ni los altavoces. |
+| MacBook Pro Camera + CoreAudio, 5 s, sin vista | La cámara informó 30 FPS. Se recibieron 157 cuadros, se procesaron 152 a 30.30 FPS y se detectaron 0 poses válidas y 0 golpes. Se abrieron cámara física y salida CoreAudio. Queda pendiente probar una interpretación con una persona en cuadro y confirmar escucha. |
+| Tres filtros One Euro sobre 33/21/21 puntos | En 4 900 actualizaciones sintéticas tras calentamiento, mediana 0.038 ms y p95 0.039 ms. Máximo 1.122 ms. Se midió solo el código NumPy y su sobrecarga inmediata en el Mac. |
+
+La regresión final aprobó 30/30 pruebas Python, 7/7 de CTest en realtime y 1/1 del núcleo histórico.
+Los resultados de sesión están en los JSON locales `artifacts/performance-*.json`.
+CTest requirió memoria compartida POSIX fuera del sandbox. Un warning de
+miniaudio por una variable sin uso apareció durante la compilación.
+
+Quedan pendientes la calificación sostenida a 60 FPS, la percepción y
+aceleración en STM32MP257F-DK con el SDK, sensor y grafo de la placa, y la
+validación con una sesión CoreAudio prolongada y detección de discontinuidades.
+No se midió latencia física movimiento → sonido. El contador ALSA que aparece
+en cero en el log de Mac no verifica la continuidad de CoreAudio. La
+cuantización por muestra se probó en render interno. Los saltos por secciones de
+canción y la fase respecto a un reloj externo quedan fuera de esta entrega.
+
+## Historial de la integración generativa
+
 ## Estado y alcance
 
 Trabajo realizado en **tuve-un-sueno**, desde el commit auditado `a84344d`.
@@ -45,7 +82,6 @@ original. El compositor usa índices MediaPipe 15/16/27/28 para muñecas/tobillo
 | `docs/EXISTING_SYSTEM_EXPLAINED.md` | Auditoría previa a modificar código |
 | `docs/SYSTEM_ARCHITECTURE.md` | Arquitectura real, composición y restricciones |
 | `docs/IMPLEMENTATION_REPORT.md` | Este informe |
-| `docs/TEST_RESULTS.json` | Copia de resultados numéricos, sin imágenes ni vídeo de cámara |
 
 Los entornos `.venv-mac` y los resultados `artifacts/` se generaron localmente y
 están ignorados por Git. Ahí están los WAV y JSON de las sesiones de prueba.
@@ -89,7 +125,7 @@ con acceso a la sesión gráfica, MediaPipe informó contexto Metal/Apple M4 y p
 C++ generó `artifacts/dsp-audition.wav`: PCM16, 48 kHz, dos canales y 384000 frames
 (ocho segundos). La prueba comprobó duración y amplitud no nula acotada.
 El archivo es reproducible con `afplay`; generar el WAV no equivale a escucharlo.
-Los valores concretos de RMS y pico están en `TEST_RESULTS.json`.
+El informe numérico histórico queda como archivo local fuera de esta integración.
 
 También quedó `artifacts/contemporary-ambient.wav`, una grabación de 12.016 s
 generada mediante el compositor Python completo: pico 0.12082 y RMS 0.01464.
