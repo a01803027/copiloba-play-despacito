@@ -28,22 +28,58 @@ def posture(points):
 
 
 class MediaPipeBackend:
-    """CPU reference implementation; NPU delegates require a board-specific adapter."""
-    def __init__(self):
+    """CPU reference implementation using MediaPipe Tasks API (1.2+, Python 3.14+)."""
+    def __init__(self, pose_model=None, hand_model=None):
+        from pathlib import Path
         import mediapipe as mp
-        self.pose = mp.solutions.pose.Pose(model_complexity=0, smooth_landmarks=False)
-        self.hands = mp.solutions.hands.Hands(max_num_hands=2, model_complexity=0)
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+
+        root = Path(__file__).resolve().parents[1]
+        pose_path = Path(pose_model) if pose_model else root / 'models' / 'pose_landmarker_lite.task'
+        hand_path = Path(hand_model) if hand_model else root / 'models' / 'hand_landmarker.task'
+        if not pose_path.is_file():
+            raise FileNotFoundError(f'Modelo pose no encontrado: {pose_path}')
+        if not hand_path.is_file():
+            raise FileNotFoundError(f'Modelo manos no encontrado: {hand_path}')
+
+        self._mp = mp
+        self._last_ts_ms = -1
+        self.pose = vision.PoseLandmarker.create_from_options(
+            vision.PoseLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=str(pose_path)),
+                running_mode=vision.RunningMode.VIDEO,
+                num_poses=1,
+            )
+        )
+        self.hands = vision.HandLandmarker.create_from_options(
+            vision.HandLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=str(hand_path)),
+                running_mode=vision.RunningMode.VIDEO,
+                num_hands=2,
+            )
+        )
 
     def infer(self, rgb):
-        p = self.pose.process(rgb)
-        h = self.hands.process(rgb)
+        ts_ms = int(time.monotonic() * 1000)
+        if ts_ms <= self._last_ts_ms:
+            ts_ms = self._last_ts_ms + 1
+        self._last_ts_ms = ts_ms
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+
+        p = self.pose.detect_for_video(mp_image, ts_ms)
+        h = self.hands.detect_for_video(mp_image, ts_ms)
         pose = None
         if p.pose_landmarks:
-            pose = [(v.x, v.y, v.z, v.visibility) for v in p.pose_landmarks.landmark]
+            pose = [
+                (float(v.x), float(v.y), float(v.z), float(v.visibility if v.visibility is not None else 1.0))
+                for v in p.pose_landmarks[0]
+            ]
         hands = {}
-        if h.multi_hand_landmarks:
-            for landmarks, handedness in zip(h.multi_hand_landmarks, h.multi_handedness):
-                hands[handedness.classification[0].label] = [(v.x, v.y, v.z) for v in landmarks.landmark]
+        if h.hand_landmarks and h.handedness:
+            for landmarks, handedness in zip(h.hand_landmarks, h.handedness):
+                label = handedness[0].category_name
+                hands[label] = [(float(v.x), float(v.y), float(v.z)) for v in landmarks]
         return pose, hands
 
     def close(self):
