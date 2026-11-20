@@ -17,7 +17,7 @@ y espera a que termine antes de seguir. Si un comando falla, conserva el error.
 ## 1. Comprueba la carpeta y la rama
 
 ```sh
-cd /Users/HaeJin/DJ
+cd /Users/yucateco/workspace/copiloba-play-despacito
 ```
 
 `cd` entra en tu carpeta del proyecto. Todos los comandos siguientes parten de
@@ -27,14 +27,13 @@ ella. Si moviste la carpeta, utiliza su ubicación real.
 pwd
 ```
 
-Muestra la carpeta actual: debe terminar en `/DJ`.
+Muestra la carpeta actual: debe terminar en `/copiloba-play-despacito`.
 
 ```sh
 git branch --show-current
 ```
 
-Muestra la rama activa. Debe decir **tuve-un-sueno**. Si dice otra cosa, detente:
-esta guía no cambia ramas y no debe trabajar sobre `main`.
+Muestra la rama activa (p. ej. **cv-daw-integracion**).
 
 ```sh
 git status --short
@@ -83,12 +82,12 @@ al escribir. La referencia oficial es [Homebrew Installation](https://docs.brew.
 No necesitas reinstalarlo si el comando anterior ya mostró una versión.
 
 ```sh
-/opt/homebrew/bin/brew install cmake python@3.11
+/opt/homebrew/bin/brew install cmake python@3.14
 ```
 
-Instala CMake y Python 3.11. CMake organiza la compilación; se fija Python 3.11
-para usar la API MediaPipe existente. No utilizamos el Python 3.14 del entorno
-anterior. Si Homebrew indica que ya están instalados, continúa.
+Instala CMake y Python 3.14. CMake organiza la compilación; se usa Python 3.14
+con MediaPipe Tasks API (1.2+) y los modelos `.task` en `models/`. Si Homebrew
+indica que ya están instalados, continúa.
 
 ## 3. Crea un entorno Python separado
 
@@ -96,7 +95,7 @@ Un entorno es una carpeta con las bibliotecas de esta aplicación. Así no se
 mezclan con otros proyectos. Se usa `.venv-mac`; no se reemplaza `.venv`.
 
 ```sh
-/opt/homebrew/bin/python3.11 -m venv .venv-mac
+/opt/homebrew/bin/python3.14 -m venv .venv-mac
 ```
 
 Crea el entorno. Si esta integración ya dejó `.venv-mac` preparado, puedes
@@ -113,29 +112,22 @@ corresponden al proyecto. Cada pestaña nueva necesita su propia activación.
 python --version
 ```
 
-Debe mostrar Python **3.11.x**. Si muestra 3.14, no continúes instalando paquetes:
-revisa que activaste `.venv-mac` y no el entorno anterior.
+Debe mostrar Python **3.14.x**.
 
 ```sh
 python -m pip install -r requirements-mac.txt
 ```
 
-Instala las versiones fijadas de MediaPipe, OpenCV, pygame y sus dependencias.
+Instala las versiones fijadas de MediaPipe 1.2+, OpenCV 5, NumPy 2 y sus dependencias.
 OpenCV-contrib ya proporciona `cv2`; no instales simultáneamente otro paquete
-OpenCV en este entorno. pygame solo es necesario para la aplicación original.
-No hace falta instalar ultralytics para el detector actual de Mili.
+OpenCV en este entorno.
 
 ```sh
-python -c "import cv2, mediapipe, pygame; print('Dependencias importadas correctamente')"
+python -c "import cv2, mediapipe; from mediapipe.tasks.python import vision; print('Dependencias importadas correctamente:', mediapipe.__version__)"
 ```
 
-Comprueba que Python puede cargar las bibliotecas. Algunos mensajes de MediaPipe
-o pygame son informativos. El fallo que debemos resolver es un traceback.
-
-MediaPipe 0.10.21 contiene un problema conocido de metadatos de arquitectura:
-algunas herramientas pueden decir «not supported on this platform» al inspeccionar
-la distribución. Aquí se pudo importar y ejecutar inferencia ARM real; no ignores
-un fallo real de importación. Véase [incidencia oficial #6112](https://github.com/google-ai-edge/mediapipe/issues/6112).
+Comprueba que Python puede cargar las bibliotecas modernas de MediaPipe Tasks.
+El fallo que debemos resolver es un traceback.
 
 ## 4. Compila el motor C++
 
@@ -403,7 +395,7 @@ No desinstala paquetes ni borra archivos.
 ## 11. Volver otro día
 
 ```sh
-cd /Users/HaeJin/DJ
+cd /Users/yucateco/workspace/copiloba-play-despacito
 ```
 
 Entra de nuevo en el proyecto.
@@ -412,7 +404,7 @@ Entra de nuevo en el proyecto.
 git branch --show-current
 ```
 
-Confirma de nuevo `tuve-un-sueno`. No hace falta descargar ni mezclar ramas.
+Confirma la rama activa (p. ej. `cv-daw-integracion`). No hace falta descargar ni mezclar ramas.
 
 ```sh
 source .venv-mac/bin/activate
@@ -439,7 +431,7 @@ vuelve a instalar sus dependencias. No hace falta recrear el entorno por rutina.
 | Mensaje/síntoma | Acción |
 | --- | --- |
 | `No module named mediapipe` | Activa `.venv-mac` e instala `requirements-mac.txt`, no solo `requirements.txt`. |
-| `mediapipe has no attribute solutions` | Confirma que estás usando la versión fijada 0.10.21 y Python 3.11. |
+| `Modelo MediaPipe no encontrado` | Asegúrate de tener `pose_landmarker_full.task` o `pose_landmarker_lite.task` en `models/`. |
 | `cmake: command not found` | Usa `/opt/homebrew/bin/cmake` en lugar de `cmake`, o revisa instalación de Homebrew. |
 | Falta `libcv_daw_ipc.dylib` o el ejecutable | Compila `realtime/build-mac`; no uses la carpeta `build` antigua. |
 | `ABI incompatible` | Detén todos los procesos y recompila biblioteca y motor juntos; la nueva versión es 2. |

@@ -1,7 +1,6 @@
-# Python 3.11, macOS Apple Silicon; preserve the legacy mp.solutions API.
-numpy==1.26.4
-opencv-contrib-python==4.11.0.86
-mediapipe==0.10.21
-pygame==2.6.1
-jax==0.4.35
-jaxlib==0.4.35
+# Python 3.14+, macOS Apple Silicon; MediaPipe Tasks API (PoseLandmarker / HandLandmarker).
+numpy==2.5.4
+opencv-contrib-python==5.0.0.93
+mediapipe==1.2.3
+pygame-ce==2.5.8
+sounddevice==0.5.6

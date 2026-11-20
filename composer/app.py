@@ -120,6 +120,7 @@ def main():
     p.add_argument('--mode',choices=('mock','camera','video'),default='camera')
     p.add_argument('--video',type=Path)
     p.add_argument('--camera',type=int,default=None,help='Índice manual; por defecto se prefiere la webcam integrada del Mac sobre el iPhone')
+    p.add_argument('--pose-model',choices=('full','lite'),default='full',help='Modelo MediaPipe Tasks (.task en models/)')
     p.add_argument('--seconds',type=float,default=0,help='0 = hasta q o Control+C')
     p.add_argument('--seed',type=int,default=7)
     p.add_argument('--launch-engine',action='store_true')
@@ -143,11 +144,11 @@ def main():
     report={}
     try:
         # Open vision before starting audio so permission prompts never leave a
-        # playing background child. Reuse Mili's actual BodyDetector class.
+        # playing background child. Uses modern MediaPipe Tasks PoseLandmarker.
         if args.mode!='mock':
             import cv2
-            from BodyTrackingModule import BodyDetector
-            detector=BodyDetector(modelComplexity=1)
+            from .tracker import PoseTracker
+            detector=PoseTracker(model=args.pose_model)
             if args.mode=='camera':
                 camera_index,camera_name=resolve_camera(args.camera)
                 print(f'Cámara: {camera_name} — índice OpenCV {camera_index}',flush=True)
@@ -185,15 +186,14 @@ def main():
                     if not ok:
                         break
                     timestamp=time.monotonic()
-                detector.findBody(image,draw=not args.no_window)
-                result=detector.results.pose_landmarks
+                points=detector.process(image,timestamp)
                 needed=(11,12,23,24)
-                if result and all(result.landmark[i].visibility>.5 for i in needed) and any(result.landmark[i].visibility>.5 for i in (15,16)):
-                    points=[(v.x,v.y,v.z,v.visibility) for v in result.landmark]
+                if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
                     features=extractor.update(points,timestamp,image.shape[0]/image.shape[1])
                 else:
                     features=extractor.missing()
                 if not args.no_window:
+                    detector.draw(image,points)
                     text=f'Energia {features.energy:.2f} Expansion {features.expansion:.2f} BPM {composer.bpm:.0f}' if features.tracked else 'Necesito ver hombros, caderas y una mano; aléjate para incluir los pies'
                     cv2.putText(image,text,(8,28),cv2.FONT_HERSHEY_SIMPLEX,.48,(0,255,0),1)
                     cv2.imshow('CV-DAW Contemporary Ambient',image)
@@ -248,7 +248,7 @@ def main():
         elif capture:
             capture.release()
         if detector:
-            detector.pose.close()
+            detector.close()
         if cv2:
             cv2.destroyAllWindows()
     if report:
