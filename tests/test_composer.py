@@ -85,9 +85,67 @@ class ComposerTests(unittest.TestCase):
     def test_mock_bounded(self):
         for n in range(300):
             f=mock_features(n/30)
-            for key in ('energy','fluidity','expansion','stillness','periodicity','symmetry'):
+            for key in ('energy','fluidity','expansion','stillness','periodicity','symmetry','left_height','right_height','body_level'):
                 self.assertGreaterEqual(getattr(f,key),0)
                 self.assertLessEqual(getattr(f,key),1)
+            self.assertGreaterEqual(f.lateral_balance,-1)
+            self.assertLessEqual(f.lateral_balance,1)
+
+    def test_occlusion_grace_period_and_expiry(self):
+        p=[(0.,0.,0.,1.)]*33
+        for i,value in {11:(-.2,.2,0,1),12:(.2,.2,0,1),23:(-.2,.6,0,1),24:(.2,.6,0,1),15:(-.5,.2,0,1),16:(.5,.2,0,1)}.items():
+            p[i]=value
+        extractor=FeatureExtractor(missing_grace_seconds=0.30)
+        extractor.update(p,1.0)
+        p[15]=(-.8,0.,0.,1.)
+        active=extractor.update(p,1.0+1/30)
+        self.assertTrue(active.tracked)
+        self.assertFalse(active.grace)
+        self.assertGreater(active.energy,0)
+        # Brief 100 ms flicker stays tracked in grace mode with decayed energy.
+        flicker=extractor.missing(1.0+1/30+0.10)
+        self.assertTrue(flicker.tracked)
+        self.assertTrue(flicker.grace)
+        self.assertLess(flicker.energy,active.energy)
+        # Missing beyond 300 ms performs hard reset.
+        lost=extractor.missing(1.0+1/30+0.40)
+        self.assertFalse(lost.tracked)
+        self.assertEqual(lost.energy,0.)
+
+    def test_left_right_heights_and_lateral_balance(self):
+        p=[(0.,0.,0.,1.)]*33
+        # Hip y=0.6, shoulder y=0.2 (torso=0.4). Left wrist high (y=0.0), right wrist low (y=0.6).
+        for i,value in {11:(-.2,.2,0,1),12:(.2,.2,0,1),23:(-.2,.6,0,1),24:(.2,.6,0,1),15:(.0,.0,0,1),16:(.6,.6,0,1)}.items():
+            p[i]=value
+        extractor=FeatureExtractor()
+        f=extractor.update(p,1.0)
+        self.assertGreater(f.left_height,f.right_height)
+        self.assertGreater(f.lateral_balance,0.0)
+
+    def test_all_genres_produce_distinct_musical_output(self):
+        from composer.genres import GENRE_ORDER
+        bpms={}
+        for genre in GENRE_ORDER:
+            brain=Composer(seed=7,genre=genre)
+            events=[]
+            for n in range(180):
+                events+=brain.update(Features(energy=.75,expansion=.7,fluidity=.6,left_height=.6,right_height=.7,lateral_balance=.4),n*1600,n/30)
+            note_ons=[e for e in events if e.kind==0]
+            self.assertGreater(len(note_ons),10,f'genre {genre} produced too few notes')
+            ctrl=brain.controls(Features(energy=.75,expansion=.7,fluidity=.6,lateral_balance=.5))
+            self.assertIn('pan',ctrl)
+            self.assertIn('delay_send',ctrl)
+            self.assertIn('resonance',ctrl)
+            self.assertIn('sidechain',ctrl)
+            bpms[genre]=brain.bpm
+        self.assertGreater(bpms['house'],bpms['ambient'])
+        # Live genre switching updates preset and triggers preset change events.
+        brain=Composer(seed=7,genre='ambient')
+        brain.update(Features(energy=.5),0,0.0)
+        brain.set_genre('house')
+        switched=brain.update(Features(energy=.5),1600,1/30)
+        self.assertTrue(any(e.kind==4 for e in switched))
+        self.assertEqual(brain.genre_key,'house')
 
 if __name__=='__main__':
     unittest.main()

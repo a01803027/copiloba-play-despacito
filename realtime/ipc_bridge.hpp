@@ -61,6 +61,8 @@ struct alignas(64) AtomicControlBlock {
  std::atomic<float> target_bpm{120},groove_energy{0.5f};
  std::array<std::atomic<float>,4> stem_volumes{{0.6f,0.6f,0.6f,0.6f}};
  std::array<std::atomic<float>,4> limb_gain{{1,1,1,1}};
+ std::array<std::atomic<float>,4> limb_pan{{0,0,0,0}}; // [-1,+1]
+ std::atomic<float> delay_send{0.0f},filter_resonance{0.70710678f},sidechain_depth{0.0f};
 };
 struct alignas(64) IpcHeader {
  std::atomic<uint32_t> magic{0};

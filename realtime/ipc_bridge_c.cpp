@@ -22,7 +22,7 @@ int cv_daw_push(void* memory,const void* packed_command,uint32_t token){
  if(s.commands.try_push(c))return 1;
  auto n=s.telemetry.producer_drops.load(std::memory_order_relaxed);s.telemetry.producer_drops.store(n+1,std::memory_order_relaxed);return 0;
 }
-// Parameter groups: 0=cutoff,1=reverb,2=bend,3=BPM,4=energy,5=stem volumes.
+// Parameter groups: 0=cutoff,1=reverb,2=bend,3=BPM,4=energy,5=stem volumes,6=gain,7=pan,8=delay,9=resonance,10=sidechain.
 int cv_daw_control(void* memory,uint32_t group,uint32_t index,float value,uint32_t token){
  auto& s=*static_cast<SharedMemory*>(memory);
  if(!token || s.header.producer_claim.load(std::memory_order_acquire)!=token || !finite(value))return 0;
@@ -36,6 +36,10 @@ int cv_daw_control(void* memory,uint32_t group,uint32_t index,float value,uint32
  case 4:c.groove_energy.store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
  case 6:c.limb_gain[index].store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
  case 5:c.stem_volumes[index].store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
+ case 7:c.limb_pan[index].store(std::clamp(value,-1.f,1.f),std::memory_order_relaxed);break;
+ case 8:c.delay_send.store(std::clamp(value,0.f,1.f),std::memory_order_relaxed);break;
+ case 9:c.filter_resonance.store(std::clamp(value,0.5f,3.5f),std::memory_order_relaxed);break;
+ case 10:c.sidechain_depth.store(std::clamp(value,0.f,0.85f),std::memory_order_relaxed);break;
  default:return 0;
  }return 1;
 }

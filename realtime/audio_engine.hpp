@@ -42,9 +42,11 @@ class AudioEngine {
  std::array<OnePoleSmoother,4> cutoff_{{OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000)}};
  std::array<OnePoleSmoother,4> send_{},bend_{};
  std::array<OnePoleSmoother,4> gain_{{OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1)}};
+ std::array<OnePoleSmoother,4> pan_{{OnePoleSmoother(0),OnePoleSmoother(0),OnePoleSmoother(0),OnePoleSmoother(0)}};
  std::array<OnePoleSmoother,4> volume_{{OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f)}};
- OnePoleSmoother bpm_{120,50},energy_{.5f,20};
- Reverb reverb_;PendingCommands pending_;
+ OnePoleSmoother bpm_{120,50},energy_{.5f,20},delay_send_{0,20},resonance_{.70710678f,20},sidechain_depth_{0,20};
+ float sidechain_env_=0.f;
+ Reverb reverb_;StereoDelay delay_;PendingCommands pending_;
  std::array<std::array<PatternSlot,32>,4> patterns_{};
  std::array<bool,4> muted_{},locked_{},stem_muted_{};
  std::array<uint8_t,4> preset_{{0,1,2,3}};
@@ -57,6 +59,7 @@ class AudioEngine {
  void trigger(unsigned limb,uint8_t note,float velocity)noexcept{
   if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset=p>=2&&p<6?samples_[p-2]:SampleView{};
   if(performance_ && p>=2 && p<6 && !asset.samples)p=limb>=2?6+(limb==2):p%2;
+  if(p==2 || p==6)sidechain_env_=1.f;
   voices_[limb].note_on(note,velocity,p,tables_,asset);
  }
  void execute(const AudioCommand& c)noexcept{
@@ -77,7 +80,7 @@ class AudioEngine {
   case EventType::NOTE_OFF:voices_[l].note_off(c.note_or_param);break;
   case EventType::MUTE_TOGGLE:muted_[l]=!muted_[l];if(muted_[l])voices_[l].silence();break;
   case EventType::LOOP_LOCK:locked_[l]=c.value>=.5f;break;
-  case EventType::PRESET_CHANGE:if(c.note_or_param<8)preset_[l]=c.note_or_param;else ++invalid_;break;
+  case EventType::PRESET_CHANGE:if(c.note_or_param<12)preset_[l]=c.note_or_param;else ++invalid_;break;
   case EventType::STEM_MUTE:break;
   }
  }
@@ -90,16 +93,20 @@ public:
  void processBlock(float* output,uint32_t frame_count)noexcept{
   if(!output || frame_count>block_frames)return;
   auto& controls=shared_.controls;
-  std::array<float,4> fc{},rs{},pb{},sv{},lg{};
+  std::array<float,4> fc{},rs{},pb{},sv{},lg{},pn{};
   for(unsigned l=0;l<4;++l){
    lg[l]=bounded(controls.limb_gain[l].load(std::memory_order_relaxed),0,1,0);
    fc[l]=bounded(controls.limb_filter_cutoff[l].load(std::memory_order_relaxed),20,18000,8000);
    rs[l]=bounded(controls.limb_reverb_send[l].load(std::memory_order_relaxed),0,1,0);
    pb[l]=bounded(controls.limb_pitch_bend[l].load(std::memory_order_relaxed),-12,12,0);
    sv[l]=bounded(controls.stem_volumes[l].load(std::memory_order_relaxed),0,1,0);
+   pn[l]=bounded(controls.limb_pan[l].load(std::memory_order_relaxed),-1,1,0);
   }
   float bpm=bounded(controls.target_bpm.load(std::memory_order_relaxed),60,200,120);
   float energy=bounded(controls.groove_energy.load(std::memory_order_relaxed),0,1,.5f);
+  float d_send=bounded(controls.delay_send.load(std::memory_order_relaxed),0,1,0);
+  float res=bounded(controls.filter_resonance.load(std::memory_order_relaxed),.5f,3.5f,.70710678f);
+  float sc=bounded(controls.sidechain_depth.load(std::memory_order_relaxed),0,.85f,0);
   stems_.requested_bpm.store(bpm,std::memory_order_relaxed);
   AudioCommand command;
   for(unsigned i=0;i<command_capacity && shared_.commands.try_pop(command);++i){
@@ -124,15 +131,26 @@ public:
    if(tick){++ticks_;for(unsigned l=0;l<4;++l)if(locked_[l]){
     auto& slot=patterns_[l][tick_index_%32];for(unsigned j=0;j<slot.count;++j)trigger(l,slot.hits[j].note,slot.hits[j].velocity);
    }}
-   Stereo master{},reverb_in{};
+   Stereo master{},reverb_in{},delay_in{};
+   float cur_delay=delay_send_.next(d_send),cur_res=resonance_.next(res),cur_sc=sidechain_depth_.next(sc);
+   sidechain_env_*=0.99988f; // ~170 ms smooth release
    for(unsigned l=0;l<4;++l){
     float cutoff=cutoff_[l].next(fc[l]),send=send_[l].next(rs[l]),bend=tables_.bend(bend_[l].next(pb[l]));
-    auto bus=voices_[l].next(tables_,bend);filters_[l][0].coefficients(cutoff);filters_[l][1].coefficients(cutoff);
+    auto bus=voices_[l].next(tables_,bend);
+    float bus_res=(l<2)?cur_res:.70710678f;
+    filters_[l][0].coefficients(cutoff,bus_res);filters_[l][1].coefficients(cutoff,bus_res);
     bus.l=filters_[l][0].next(bus.l).low;bus.r=filters_[l][1].next(bus.r).low;
-    float limb_gain=gain_[l].next(lg[l]);bus.l*=limb_gain;bus.r*=limb_gain;
-    master.l+=bus.l;master.r+=bus.r;reverb_in.l+=bus.l*send;reverb_in.r+=bus.r*send;
+    float limb_gain=gain_[l].next(lg[l]);
+    if(l==0 && cur_sc>1e-4f)limb_gain*=(1.f-cur_sc*sidechain_env_);
+    bus=apply_pan({bus.l*limb_gain,bus.r*limb_gain},pan_[l].next(pn[l]));
+    master.l+=bus.l;master.r+=bus.r;
+    reverb_in.l+=bus.l*send;reverb_in.r+=bus.r*send;
+    if(l<2 && cur_delay>1e-4f){delay_in.l+=bus.l*cur_delay;delay_in.r+=bus.r*cur_delay;}
    }
-   auto wet=reverb_.next(reverb_in);master.l+=wet.l*.25f;master.r+=wet.r*.25f;
+   auto del=delay_.next(delay_in,current_bpm);
+   master.l+=del.l*.32f;master.r+=del.r*.32f;
+   reverb_in.l+=del.l*.18f;reverb_in.r+=del.r*.18f;
+   auto wet=reverb_.next(reverb_in);master.l+=wet.l*.34f;master.r+=wet.r*.34f;
    StemFrame stems{};if(stems_enabled && !stems_.frames.try_pop(stems))++starved_;
    for(unsigned l=0;l<4;++l){float vol=volume_[l].next(stem_muted_[l]?0:sv[l]);master.l+=stems.stem[l].l*vol;master.r+=stems.stem[l].r*vol;}
    float gain=.4f+.2f*current_energy;output[2*n]=master.l*gain;output[2*n+1]=master.r*gain;

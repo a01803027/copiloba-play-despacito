@@ -11,10 +11,75 @@ import threading
 import time
 from .brain import Composer
 from .features import FeatureExtractor, mock_features
+from .genres import GENRE_ORDER
 from .ipc import Bridge
 from .cameras import resolve_camera
 
 ROOT=Path(__file__).resolve().parents[1]
+
+
+def default_build_dir():
+    preferred = ROOT / ('realtime/build-mac' if sys.platform == 'darwin' else 'realtime/build')
+    if preferred.is_dir():
+        return preferred
+    fallback = ROOT / 'realtime/build'
+    return fallback if fallback.is_dir() else preferred
+
+
+def draw_hud(cv2, image, features, composer):
+    """Draw a clean, translucent musical HUD onto the display frame."""
+    h, w = image.shape[:2]
+    overlay = image.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 92), (18, 20, 26), -1)
+    cv2.addWeighted(overlay, 0.72, image, 0.28, 0, image)
+
+    if not features.tracked:
+        status_text, status_color = 'BUSCANDO POSE', (70, 90, 240)
+    elif features.grace:
+        status_text, status_color = 'GRACE', (40, 195, 255)
+    else:
+        status_text, status_color = 'TRACKING', (90, 230, 120)
+
+    cv2.circle(image, (22, 24), 7, status_color, -1, cv2.LINE_AA)
+    title = f'{getattr(composer, "preset", "CV-DAW")}  |  BPM {composer.bpm:.0f}'
+    chord_name = getattr(composer, 'current_chord_name', '')
+    if chord_name:
+        title += f'  |  {chord_name}'
+    cv2.putText(image, title, (38, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 244, 248), 2, cv2.LINE_AA)
+    cv2.putText(image, status_text, (w - 155, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.50, status_color, 1, cv2.LINE_AA)
+
+    if not features.tracked:
+        cv2.putText(
+            image,
+            'Necesito ver hombros, caderas y al menos una mano (alejate para incluir piernas)',
+            (18, 66),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (180, 190, 210),
+            1,
+            cv2.LINE_AA,
+        )
+        return image
+
+    meters = (
+        ('Energia', features.energy, (60, 210, 255)),
+        ('Expansion', features.expansion, (120, 230, 130)),
+        ('Fluidez', features.fluidity, (240, 170, 90)),
+        ('Altura', 0.5 * (features.left_height + features.right_height), (220, 130, 245)),
+    )
+    bar_w = max(70, (w - 60) // len(meters) - 20)
+    for idx, (label, val, color) in enumerate(meters):
+        x0 = 18 + idx * (bar_w + 20)
+        y0 = 56
+        cv2.putText(image, f'{label} {val:.2f}', (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 216, 224), 1, cv2.LINE_AA)
+        cv2.rectangle(image, (x0, y0), (x0 + bar_w, y0 + 12), (55, 60, 72), -1)
+        fill = int(bar_w * max(0.0, min(1.0, val)))
+        if fill > 0:
+            cv2.rectangle(image, (x0, y0), (x0 + fill, y0 + 12), color, -1)
+
+    footer = 'Teclas: [1] Ambient  [2] House  [3] Lo-Fi  [4] Cinematic  |  [q] Salir'
+    cv2.putText(image, footer, (18, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 225, 235), 1, cv2.LINE_AA)
+    return image
 
 
 def start_engine(args):
@@ -118,15 +183,18 @@ class LatestCamera:
 def main():
     p=argparse.ArgumentParser(description='Compositor Contemporary Ambient controlado por danza')
     p.add_argument('--mode',choices=('mock','camera','video'),default='camera')
+    p.add_argument('--genre',choices=GENRE_ORDER,default='ambient',help='Género musical inicial (cambiable en vivo con teclas 1-4)')
     p.add_argument('--video',type=Path)
     p.add_argument('--camera',type=int,default=None,help='Índice manual; por defecto se prefiere la webcam integrada del Mac sobre el iPhone')
     p.add_argument('--pose-model',choices=('full','lite'),default='full',help='Modelo MediaPipe Tasks (.task en models/)')
+    p.add_argument('--no-mirror',action='store_true',help='Desactiva el efecto espejo en la ventana de cámara')
     p.add_argument('--seconds',type=float,default=0,help='0 = hasta q o Control+C')
     p.add_argument('--seed',type=int,default=7)
     p.add_argument('--launch-engine',action='store_true')
-    p.add_argument('--engine',default=str(ROOT/'realtime/build-mac/cv-daw-engine'))
+    build_dir=default_build_dir()
+    p.add_argument('--engine',default=str(build_dir/'cv-daw-engine'))
     suffix='dylib' if sys.platform=='darwin' else 'so'
-    p.add_argument('--library',default=str(ROOT/f'realtime/build-mac/libcv_daw_ipc.{suffix}'))
+    p.add_argument('--library',default=str(build_dir/f'libcv_daw_ipc.{suffix}'))
     p.add_argument('--offline-audio',action='store_true',help='Prueba sin dispositivo de audio')
     p.add_argument('--record',help='WAV de integración offline, con IPC y compositor Python')
     p.add_argument('--no-window',action='store_true')
@@ -140,7 +208,7 @@ def main():
         p.error('--record y --offline-audio requieren --launch-engine')
     process=None;bridge=None;capture=None;detector=None;cv2=None
     started=time.monotonic();frames=0;tracked_frames=0;max_loop=0;energies=[];probes=[];notes=0
-    composer=Composer(args.seed);extractor=FeatureExtractor()
+    composer=Composer(args.seed,genre=args.genre);extractor=FeatureExtractor()
     report={}
     try:
         # Open vision before starting audio so permission prompts never leave a
@@ -191,14 +259,19 @@ def main():
                 if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
                     features=extractor.update(points,timestamp,image.shape[0]/image.shape[1])
                 else:
-                    features=extractor.missing()
+                    features=extractor.missing(timestamp)
                 if not args.no_window:
                     detector.draw(image,points)
-                    text=f'Energia {features.energy:.2f} Expansion {features.expansion:.2f} BPM {composer.bpm:.0f}' if features.tracked else 'Necesito ver hombros, caderas y una mano; aléjate para incluir los pies'
-                    cv2.putText(image,text,(8,28),cv2.FONT_HERSHEY_SIMPLEX,.48,(0,255,0),1)
-                    cv2.imshow('CV-DAW Contemporary Ambient',image)
-                    if cv2.waitKey(1)&0xff==ord('q'):
+                    display=cv2.flip(image,1) if (args.mode=='camera' and not args.no_mirror) else image
+                    draw_hud(cv2,display,features,composer)
+                    cv2.imshow('CV-DAW Contemporary Ambient',display)
+                    key=cv2.waitKey(1)&0xff
+                    if key==ord('q'):
                         break
+                    if key in (ord('1'),ord('2'),ord('3'),ord('4')):
+                        selected=GENRE_ORDER[key-ord('1')]
+                        composer.set_genre(selected)
+                        print(f'Género cambiado a: {composer.preset}',flush=True)
             frame=bridge.metric(0)
             events=composer.update(features,frame,elapsed)
             bridge.controls(composer.controls(features))

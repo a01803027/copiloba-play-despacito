@@ -46,11 +46,21 @@ struct Assets {
  Assets(){
   uint32_t rng=1234567;
   for(auto& data:samples)data.resize(24000*2);
-  double kick_phase=0;
+  double kick_phase=0,prev_noise=0;
   for(unsigned n=0;n<24000;++n){double t=double(n)/sample_rate;
    rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;double noise=double(rng)/UINT32_MAX*2-1;
-   kick_phase+=2*std::numbers::pi*(45+100*std::exp(-40*t))/sample_rate;
-   std::array<float,4> value{float(std::sin(kick_phase)*std::exp(-12*t)),float((.8*noise+.2*std::sin(2*std::numbers::pi*180*t))*std::exp(-18*t)),float(noise*std::exp(-65*t)),float((std::sin(2*std::numbers::pi*261.6256*t)+.3*std::sin(2*std::numbers::pi*392*t))*std::exp(-7*t)*.7)};
+   double hp_noise=noise-0.85*prev_noise;prev_noise=noise;
+   // Punchy sub-kick (155 Hz -> 46 Hz) + short 4 ms transient click + warm saturation.
+   kick_phase+=2*std::numbers::pi*(46+110*std::exp(-38*t))/sample_rate;
+   double kick=std::tanh(1.5*(std::sin(kick_phase)*std::exp(-9.5*t)+0.28*noise*std::exp(-240*t)));
+   // Snare/Clap: 185 Hz body + filtered noise snap + subtle clap double-hit at 11 ms.
+   double clap_env=std::exp(-22*t)+(t>0.011?0.55*std::exp(-28*(t-0.011)):0.0);
+   double snare=std::tanh(1.2*(0.32*std::sin(2*std::numbers::pi*185*t)*std::exp(-24*t)+0.55*hp_noise*clap_env));
+   // Crisp high-passed metallic hi-hat.
+   double hat=(0.75*hp_noise+0.25*std::sin(2*std::numbers::pi*7420*t)*std::sin(2*std::numbers::pi*9180*t))*std::exp(-48*t)*0.55;
+   // Warm minor-9th chord stab.
+   double stab=(std::sin(2*std::numbers::pi*261.63*t)+0.7*std::sin(2*std::numbers::pi*311.13*t)+0.6*std::sin(2*std::numbers::pi*392.0*t)+0.4*std::sin(2*std::numbers::pi*587.33*t))*std::exp(-6.5*t)*0.28;
+   std::array<float,4> value{float(kick),float(snare),float(hat),float(stab)};
    for(unsigned j=0;j<4;++j)samples[j][2*n]=samples[j][2*n+1]=value[j];
   }
  }

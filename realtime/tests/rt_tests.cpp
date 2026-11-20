@@ -103,6 +103,26 @@ int main(){
   for(unsigned i=0;i<100;++i){no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;}
   for(float value:output)CHECK(std::abs(value)<1e-6f);
  }
+ // Verify new studio synth presets (8..11), stereo pan, FDN reverb, stereo delay and sidechain with zero allocations.
+ {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();AudioEngine e(*local,*tables,{},*bus);
+  local->controls.delay_send.store(.4f);local->controls.filter_resonance.store(1.4f);
+  local->controls.sidechain_depth.store(.5f);local->controls.limb_pan[1].store(.7f);
+  for(unsigned l=0;l<4;++l){
+   CHECK(local->commands.try_push({LimbID(l),EventType::PRESET_CHANGE,uint8_t(8+l),0,0,0}));
+   CHECK(local->commands.try_push({LimbID(l),EventType::NOTE_ON,uint8_t(48+l*5),0,.8f,0}));
+  }
+  float peak_l=0,peak_r=0;
+  for(unsigned i=0;i<60;++i){
+   no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;
+   for(unsigned n=0;n<128;++n){
+    CHECK(finite(output[2*n])&&finite(output[2*n+1]));
+    CHECK(std::abs(output[2*n])<=1.f&&std::abs(output[2*n+1])<=1.f);
+    peak_l=std::max(peak_l,std::abs(output[2*n]));peak_r=std::max(peak_r,std::abs(output[2*n+1]));
+   }
+  }
+  CHECK(peak_l>1e-3f && peak_r>1e-3f);
+  CHECK(local->telemetry.invalid_commands.load()==0);
+ }
 #ifdef __linux__
  // Kernel-enforced zero-system-call test, including libc/vDSO-fallback paths.
  // All allocation, libc warmup and fork happen BEFORE installing the filter.
