@@ -1,38 +1,28 @@
-# CV-DAW — Contemporary Ambient
+# CV-DAW — Instrumento Musical Controlado por el Cuerpo
 
-Compositor generativo controlado por danza. La integración actual conecta
-OpenCV/MediaPipe en Python con el DSP C++20 mediante memoria compartida.
-En macOS reproduce por **CoreAudio**; el destino STM32 conserva **ALSA**.
+Sistema generativo interactivo en tiempo real que traduce el movimiento corporal (MediaPipe Pose Tasks 1.2+ en Python 3.14) en música polifónica mediante un motor DSP C++20 conectado por memoria compartida sin bloqueos (`/cv_daw_shm`).
+En macOS reproduce por **CoreAudio**; en Linux ARM64 (Raspberry Pi 5 / STM32) usa **ALSA**.
 
-**Empieza por [MAC_SETUP.md](MAC_SETUP.md).** Incluye instalación, entorno Python,
-compilación, prueba sin cámara y aplicación con cámara, paso a paso.
+**Empieza por [MAC_SETUP.md](MAC_SETUP.md).**
 
-- [Qué hacía el prototipo original](docs/EXISTING_SYSTEM_EXPLAINED.md).
-- [Arquitectura y reglas musicales](docs/SYSTEM_ARCHITECTURE.md).
-- [Resultados reales y limitaciones](docs/IMPLEMENTATION_REPORT.md).
+## Ejecución rápida
 
-La aplicación nueva se ejecuta como `python -m composer.app`. El modo `mock`
-permite componer sin cámara; `camera` usa la cámara; `video` usa un archivo local.
-La opción `--launch-engine` inicia y cierra automáticamente el motor C++.
-Consulta la guía antes de ejecutarla: requiere compilar y activar `.venv-mac`.
+```sh
+source .venv-mac/bin/activate
+python -m composer.app --mode camera --style synthwave --launch-engine
+```
 
-## Organización
+- Cambia entre estilos musicales con **`N`/`P`** (o **`1`–`9`,`0`,`-`,`=`**).
+- Bloquea o desbloquea el auto-sync de BPM con **`T`**.
+- Sin cámara: `python -m composer.app --mode mock --style house --launch-engine --seconds 20`.
 
-| Carpeta/archivo | Uso |
+## Estructura del repositorio
+
+| Carpeta / archivo | Responsabilidad |
 | --- | --- |
-| `BrazoIzquierdo.py`, `BodyTrackingModule.py`, `HandTrackingModule.py` | Prototipo original de Mili, conservado |
-| `composer/` | Características, compositor en tres tiempos, puente Python y aplicación integrada |
-| `realtime/` | Motor miniaudio, IPC versión 2, DSP y pruebas Mac/Linux |
-| `requirements-mac.txt` | Dependencias fijadas para la integración con Python 3.11 |
-| `include/cvdaw/`, `src/`, `perception/` | Primera implementación Linux; tiene otro protocolo y no se combina con el compositor nuevo |
-| `artifacts/` | WAV y métricas locales generadas por las pruebas; ignorados por Git |
-
-La memoria del sistema integrado se llama `/cv_daw_shm`. La implementación Linux
-anterior usa `/cvdaw`. No son intercambiables ni deben ejecutarse como si fueran
-una sola cadena.
-
-Las cinco pruebas CTest de `realtime/build-mac` pasaron en el entorno de desarrollo.
-También se ejecutaron CoreAudio, cámara y MediaPipe sobre vídeo; el alcance exacto
-está en el informe. Sigue pendiente una sesión de danza escuchada por la persona
-usuaria y la validación de latencia/XRUNs en STM32. Ningún resultado Mac demuestra
-comportamiento determinista en el Cortex-A35.
+| `composer/` | Visión MediaPipe Tasks (`tracker.py`), rasgos corporales (`features.py`, `rhythm.py`), arreglista (`arrangement.py`, `brain.py`, `procedural.py`), estilos JSON (`styles/presets/`), IPC (`ipc.py`) y app (`app.py`) |
+| `realtime/` | Motor DSP C++20 (`audio_engine.*`, `dsp_primitives.hpp`), puente IPC lock-free (`ipc_bridge*`), `miniaudio` y pruebas RT |
+| `models/` | Modelos MediaPipe `.task` locales (`pose_landmarker_full.task`, `pose_landmarker_lite.task`, `hand_landmarker.task`) |
+| `tests/` | Pruebas unitarias de tracking, ritmo, estilos, arreglista y cámara |
+| `docs/` | Arquitectura del sistema y plan de validación en hardware |
+| `requirements-mac.txt` | Dependencias Python 3.14+ |

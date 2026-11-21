@@ -6,12 +6,9 @@ __pycache__/
 .env
 djvision/
 .vscode/
+.idea/
 /build*/
 /realtime/build*/
 
 .venv-mac/
 artifacts/
-
-/docs/TEST_RESULTS.json
-
-*.mp4
