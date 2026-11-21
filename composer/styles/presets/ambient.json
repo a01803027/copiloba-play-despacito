@@ -1,15 +1,15 @@
 {
   "key": "ambient",
-  "label": "Contemporary Ambient",
+  "label": "Dream Ambient",
   "order": 1,
   "base_midi": 48,
   "scale": [0, 2, 3, 5, 7, 8, 10],
-  "bpm_default": 76,
-  "bpm_min": 68,
-  "bpm_max": 94,
+  "bpm_default": 72,
+  "bpm_min": 66,
+  "bpm_max": 84,
   "swing": 0.08,
-  "presets": [8, 9, 11, 12],
-  "strum_ms": 28,
+  "presets": [8, 14, 11, 12],
+  "strum_ms": 34,
   "progression": [
     {"degree": 0, "name": "Cm9", "voicing": [0, 2, 4, 8]},
     {"degree": 5, "name": "Abmaj7", "voicing": [0, 2, 4, 6]},
@@ -19,29 +19,29 @@
   "bright_chord": {"degree": 5, "name": "Abmaj9", "voicing": [0, 2, 4, 8]},
   "tension_chord": {"degree": 4, "name": "Gm11", "voicing": [0, 2, 4, 6]},
   "comping_steps": [0],
-  "chord_duration_s": 3.4,
+  "chord_duration_s": 3.6,
   "motifs": {
-    "a": [[0, 0, 4], [4, 2, 3], [8, 4, 4], [12, 2, 3]],
-    "b": [[0, 4, 3], [4, 6, 3], [8, 7, 4], [12, 4, 3]]
+    "a": [[0, 4, 4], [6, 7, 4], [12, 9, 4]],
+    "b": [[0, 7, 4], [4, 9, 4], [10, 11, 4]]
   },
   "bass_pattern": [[0, 0, 8], [8, 0, 6]],
   "drums": {
     "kick_groove": [0],
     "kick_full": [0, 10],
-    "snare": [12],
+    "snare": [],
     "hat_groove": [4, 12],
     "hat_full": [2, 6, 10, 14],
     "open_hat": [10],
-    "ghost_snare": [6, 14],
-    "fill_bar4": [[12, 42], [14, 46], [15, 38]]
+    "ghost_snare": [12],
+    "fill_bar4": [[12, 42], [14, 46], [15, 49]]
   },
   "fx": {
-    "cutoff_pad": [480, 6200],
-    "cutoff_lead": [900, 8800],
-    "reverb_pad": [0.48, 0.88],
-    "reverb_lead": [0.36, 0.78],
-    "delay_send": 0.42,
-    "resonance": 0.85,
-    "sidechain": 0.18
+    "cutoff_pad": [900, 9500],
+    "cutoff_lead": [1800, 13500],
+    "reverb_pad": [0.55, 0.90],
+    "reverb_lead": [0.45, 0.85],
+    "delay_send": 0.52,
+    "resonance": 0.80,
+    "sidechain": 0.14
   }
 }

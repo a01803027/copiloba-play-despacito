@@ -24,8 +24,8 @@ class SectionController:
         self.drop_until = -1e9
 
     def update(self, live_energy: float, features: Features, seconds: float) -> str:
-        # Shrugging shoulders up immediately engages musical BUILD-UP tension.
-        if features.shoulder_lift >= 0.48:
+        # Shrugging shoulders up clearly (>= 0.62) engages musical BUILD-UP tension.
+        if features.shoulder_lift >= 0.62:
             self.section = 'BUILDUP'
             return self.section
 

@@ -8,7 +8,7 @@
 #include <arm_neon.h>
 #endif
 namespace cv_daw {
-inline constexpr uint32_t sample_rate=48000,block_frames=128,voices_per_limb=8;
+inline constexpr uint32_t sample_rate=48000,block_frames=128,voices_per_limb=12;
 inline float bounded(float value,float lo,float hi,float fallback)noexcept {
  return finite(value)?std::clamp(value,lo,hi):fallback;
 }
@@ -29,6 +29,12 @@ public:
  float next(float target)noexcept{float updated=state_+alpha_*(target-state_);state_=updated==state_?target:updated;return state_;}
  float value()const noexcept{return state_;}
 };
+class OnePoleHpf {
+ float prev_in_=0,prev_out_=0,r_=0.975f;
+public:
+ explicit OnePoleHpf(float hz=190.f){float rc=1.f/(2.f*float(std::numbers::pi)*hz);float dt=1.f/float(sample_rate);r_=rc/(rc+dt);}
+ float next(float in)noexcept{float out=r_*(prev_out_+in-prev_in_);prev_in_=in;prev_out_=out;return out;}
+};
 class Adsr {
  enum class Stage:uint8_t{off,attack,decay,sustain,release};Stage stage_=Stage::off;
  float level_=0,release_step_=0;
@@ -45,6 +51,7 @@ public:
  void on()noexcept{stage_=Stage::attack;level_=0;}
  void off()noexcept{if(stage_!=Stage::off && stage_!=Stage::release){stage_=Stage::release;release_step_=level_/release_samples_;}}
  bool active()const noexcept{return stage_!=Stage::off;}
+ bool releasing()const noexcept{return stage_==Stage::release;}
  float next()noexcept{
   switch(stage_){
   case Stage::attack:level_+=attack_step_;if(level_>=1){level_=1;stage_=Stage::decay;}break;
@@ -121,22 +128,29 @@ struct Voice {
   increment=tables.increments[n];band=uint8_t(tables.band_for(increment));
   gain=velocity;preset_id=uint8_t(preset);
   drum=(preset==6 || preset==7)?uint8_t(preset-5):0;
-  noise=1;is_sample=(preset>=2 && preset<6) || preset==12;is_sine=preset==1;
+  noise=1234567u+uint32_t(n)*2654435761u;
+  bool is_crash=(preset==12 && n==49);
+  is_sample=(preset>=2 && preset<6) || (preset==12 && !is_crash);is_sine=preset==1;
   sample=asset;active=!is_sample || (sample.samples && sample.frames);
   mod_env=1.0f;
-  // Configure musical envelopes per preset while keeping presets 0..7 unchanged.
+  // Configure musical click-free envelopes per preset while keeping presets 0..7 unchanged.
   if(preset==8){ // Warm Unison Pad
-   envelope.configure(160.f,450.f,.78f,850.f);max_age=uint32_t(4.5f*sample_rate);
+   envelope.configure(120.f,450.f,.78f,700.f);max_age=uint32_t(3.8f*sample_rate);
   }else if(preset==9){ // FM Warm Keys (Electric Piano)
-   envelope.configure(4.f,650.f,.32f,360.f);max_age=uint32_t(3.5f*sample_rate);
+   envelope.configure(4.f,520.f,.32f,300.f);max_age=uint32_t(2.8f*sample_rate);
   }else if(preset==10){ // Supersaw / Pluck Lead
-   envelope.configure(3.f,220.f,.28f,220.f);max_age=2*sample_rate;
+   envelope.configure(4.f,200.f,.32f,190.f);max_age=2*sample_rate;
   }else if(preset==11){ // Deep Sub / Warm Bass
-   envelope.configure(5.f,180.f,.68f,140.f);max_age=2*sample_rate;
-  }else if(preset==12){ // Polyphonic Drum Kit (note 42=tight hat, 46=open hat, 36=kick, 38=snare)
-   if(n==42){envelope.configure(1.f,45.f,.08f,55.f);max_age=uint32_t(0.10f*sample_rate);}
-   else if(n==46){envelope.configure(1.f,220.f,.22f,260.f);max_age=uint32_t(0.35f*sample_rate);}
-   else{envelope.configure(1.f,140.f,.65f,120.f);max_age=uint32_t(0.60f*sample_rate);}
+   envelope.configure(5.f,160.f,.64f,120.f);max_age=2*sample_rate;
+  }else if(preset==12){ // Polyphonic Drum Kit (36=kick, 38=snare, 42=closed hat, 46=open hat, 49=crash)
+   if(n==42){envelope.configure(1.5f,42.f,.04f,45.f);max_age=uint32_t(0.09f*sample_rate);}
+   else if(n==46){envelope.configure(1.5f,180.f,.15f,190.f);max_age=uint32_t(0.28f*sample_rate);}
+   else if(n==49){envelope.configure(3.f,420.f,.03f,260.f);max_age=uint32_t(0.65f*sample_rate);phase3=0;mod_env=0;}
+   else{envelope.configure(1.5f,140.f,.65f,110.f);max_age=uint32_t(0.55f*sample_rate);}
+  }else if(preset==13){ // Warm Punchy Pluck Lead
+   envelope.configure(3.5f,165.f,.20f,160.f);max_age=2*sample_rate;
+  }else if(preset==14){ // Tropical / Acoustic Bell-Pluck (Marimba/Nylon hybrid)
+   envelope.configure(3.5f,260.f,.08f,200.f);max_age=2*sample_rate;
   }else{
    envelope.configure(3.f,80.f,.55f,120.f);max_age=2*sample_rate;
   }
@@ -163,55 +177,98 @@ struct Voice {
    out={value,value};
    phase+=increment*bend_ratio*(1+tail*tail*(drum==1?3:1));phase-=unsigned(phase);
    if(age+1==duration)active=false;
+  }else if(preset_id==12 && note==49){
+   // Warm Studio Crash Cymbal: band-limited silky shimmer (no raw white-noise hiss).
+   noise^=noise<<13;noise^=noise>>17;noise^=noise<<5;
+   float w1=float(noise>>8)*(2.f/16777216.f)-1.f;
+   noise^=noise<<13;noise^=noise>>17;noise^=noise<<5;
+   float w2=float(noise>>8)*(2.f/16777216.f)-1.f;
+   // 1-pole low-pass smoother (~5.2 kHz) stored in phase3 & mod_env for silky stereo wash.
+   phase3+=0.42f*(w1-phase3);
+   mod_env+=0.42f*(w2-mod_env);
+   float metal=tables.oscillator(phase,band,true)*tables.oscillator(phase2,band,true);
+   float l_sig=phase3*0.38f+metal*0.32f;
+   float r_sig=mod_env*0.38f-metal*0.32f;
+   float scale=env*gain*0.26f;
+   out={l_sig*scale,r_sig*scale};
+   phase+=0.072f;if(phase>=1.f)phase-=1.f;
+   phase2+=0.113f;if(phase2>=1.f)phase2-=1.f;
   }else if(preset_id==8){
-   // Warm Unison Pad: 3 detuned stereo oscillators (velocity-to-timbre saw/triangle blend).
+   // Warm Unison Pad: 3 wide stereo detuned oscillators with airy harmonic blend.
    float inc=std::min(increment*bend_ratio,.45f);
-   float saw_mix=0.28f+0.42f*gain;
+   float saw_mix=0.45f+0.35f*gain;
    float tri_mix=1.f-saw_mix;
    float s_c=tri_mix*tables.triangle(phase,band)+saw_mix*tables.oscillator(phase,band,false);
    float s_l=saw_mix*tables.oscillator(phase2,band,false)+tri_mix*tables.triangle(phase2,band);
    float s_r=saw_mix*tables.oscillator(phase3,band,false)+tri_mix*tables.triangle(phase3,band);
-   float scale=env*gain*0.14f;
-   out={(s_c*0.55f+s_l*0.75f+s_r*0.25f)*scale,(s_c*0.55f+s_r*0.75f+s_l*0.25f)*scale};
+   float scale=env*gain*0.18f;
+   out={(s_c*0.42f+s_l*0.85f+s_r*0.12f)*scale,(s_c*0.42f+s_r*0.85f+s_l*0.12f)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
-   phase2+=std::min(inc*0.9948f,.45f);if(phase2>=1.f)phase2-=1.f; // -9 cents
-   phase3+=std::min(inc*1.0052f,.45f);if(phase3>=1.f)phase3-=1.f; // +9 cents
+   phase2+=std::min(inc*0.9935f,.45f);if(phase2>=1.f)phase2-=1.f; // -11 cents
+   phase3+=std::min(inc*1.0065f,.45f);if(phase3>=1.f)phase3-=1.f; // +11 cents
   }else if(preset_id==9){
    // FM Warm Keys (Rhodes-like 2-op FM bell attack scaled by velocity + warm body).
    float inc=std::min(increment*bend_ratio,.45f);
-   mod_env*=0.99985f;
-   float vel_mod=0.55f+0.85f*gain;
-   float mod=tables.oscillator(phase2,band,true)*(0.10f+1.35f*vel_mod*mod_env*mod_env);
-   float p_mod=phase+mod*0.16f;p_mod-=std::floor(p_mod);
+   mod_env*=0.99982f;
+   float vel_mod=0.65f+0.90f*gain;
+   float mod=tables.oscillator(phase2,band,true)*(0.14f+1.55f*vel_mod*mod_env*mod_env);
+   float p_mod=phase+mod*0.18f;p_mod-=std::floor(p_mod);
    float body=tables.oscillator(p_mod,band,true);
-   float shimmer=tables.oscillator(phase3,band,true)*0.14f*vel_mod*mod_env;
-   float scale=env*gain*0.22f;
-   out={(body+shimmer)*scale,(body-shimmer*0.7f)*scale};
+   float shimmer=tables.oscillator(phase3,band,true)*0.22f*vel_mod*mod_env;
+   float scale=env*gain*0.28f;
+   out={(body+shimmer)*scale,(body-shimmer*0.85f)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
    phase2+=std::min(inc*2.0f,.45f);if(phase2>=1.f)phase2-=1.f;
-   phase3+=std::min(inc*3.004f,.45f);if(phase3>=1.f)phase3-=1.f;
+   phase3+=std::min(inc*3.005f,.45f);if(phase3>=1.f)phase3-=1.f;
   }else if(preset_id==10){
-   // Supersaw / Pluck Lead: stereo detuned saws + warm fundamental sine (velocity-to-timbre).
+   // Supersaw / Pluck Lead: wide stereo detuned saws + bright harmonic presence.
    float inc=std::min(increment*bend_ratio,.45f);
-   mod_env*=0.99975f;
+   mod_env*=0.99972f;
    float sl=tables.oscillator(phase2,band,false);
    float sr=tables.oscillator(phase3,band,false);
    float sub=tables.oscillator(phase,band,true);
-   float bright=(0.28f+0.72f*mod_env)*(0.55f+0.45f*gain);
-   float scale=env*gain*0.16f;
-   out={(sub*0.45f+(sl*0.75f+sr*0.25f)*bright)*scale,(sub*0.45f+(sr*0.75f+sl*0.25f)*bright)*scale};
+   float bright=(0.40f+0.60f*mod_env)*(0.60f+0.40f*gain);
+   float scale=env*gain*0.23f;
+   out={(sub*0.32f+(sl*0.88f+sr*0.12f)*bright)*scale,(sub*0.32f+(sr*0.88f+sl*0.12f)*bright)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
-   phase2+=std::min(inc*0.9960f,.45f);if(phase2>=1.f)phase2-=1.f; // -7 cents
-   phase3+=std::min(inc*1.0040f,.45f);if(phase3>=1.f)phase3-=1.f; // +7 cents
+   phase2+=std::min(inc*0.9942f,.45f);if(phase2>=1.f)phase2-=1.f; // -10 cents
+   phase3+=std::min(inc*1.0058f,.45f);if(phase3>=1.f)phase3-=1.f; // +10 cents
   }else if(preset_id==11){
-   // Deep Sub / Warm Bass: clean sine sub + subtle velocity-driven warm harmonic.
+   // Deep Sub / Warm Bass: tight sine sub + audible mid-bass harmonic for laptop & PA speakers.
    float inc=std::min(increment*bend_ratio,.45f);
    float sub=tables.oscillator(phase,band,true);
-   float harm=tables.triangle(phase2,band)*(0.20f+0.25f*gain);
-   float v=(sub+harm)*env*gain*0.26f;
+   float harm=tables.oscillator(phase2,band,false)*(0.24f+0.26f*gain);
+   float v=(sub*0.78f+harm)*env*gain*0.24f;
    out={v,v};
    phase+=inc;if(phase>=1.f)phase-=1.f;
    phase2+=std::min(inc*2.0f,.45f);if(phase2>=1.f)phase2-=1.f;
+  }else if(preset_id==13){
+   // Warm Punchy Pluck Lead: tight stereo detuned saw + subtle octave attack without harsh fizz.
+   float inc=std::min(increment*bend_ratio,.45f);
+   mod_env*=0.99920f;
+   unsigned oct_band=tables.band_for(std::min(inc*2.f,.45f));
+   float sl=tables.oscillator(phase2,band,false);
+   float sr=tables.oscillator(phase3,band,false);
+   float body=tables.triangle(phase2,band)*0.30f;
+   float oct=tables.oscillator(phase,oct_band,false)*0.24f*mod_env;
+   float scale=env*gain*0.26f;
+   out={(body+sl*0.75f+sr*0.15f+oct)*scale,(body+sr*0.75f+sl*0.15f-oct*0.5f)*scale};
+   phase+=std::min(inc*2.0f,.45f);if(phase>=1.f)phase-=1.f;
+   phase2+=std::min(inc*0.9940f,.45f);if(phase2>=1.f)phase2-=1.f;
+   phase3+=std::min(inc*1.0060f,.45f);if(phase3>=1.f)phase3-=1.f;
+  }else if(preset_id==14){
+   // Tropical / Acoustic Bell-Pluck (Marimba / Nylon Guitar hybrid): bright woody FM ping + warm body.
+   float inc=std::min(increment*bend_ratio,.45f);
+   mod_env*=0.99910f; // fast 30 ms woody pluck transient
+   float ping=tables.oscillator(phase3,band,true)*(2.4f*mod_env*mod_env);
+   float p_mod=phase+ping*0.22f;p_mod-=std::floor(p_mod);
+   float body=tables.triangle(p_mod,band)*0.75f+tables.oscillator(phase,band,true)*0.25f;
+   float overtone=tables.oscillator(phase2,band,true)*0.32f*mod_env;
+   float scale=env*gain*0.30f;
+   out={(body+overtone)*scale,(body-overtone*0.75f)*scale};
+   phase+=inc;if(phase>=1.f)phase-=1.f;
+   phase2+=std::min(inc*2.0f,.45f);if(phase2>=1.f)phase2-=1.f;
+   phase3+=std::min(inc*3.98f,.45f);if(phase3>=1.f)phase3-=1.f;
   }else{
    float value=tables.oscillator(phase,band,is_sine)*env*gain*.18f;out={value,value};
    phase+=std::min(increment*bend_ratio,.45f);if(phase>=1)phase-=1;
@@ -223,7 +280,16 @@ class VoicePool {
  std::array<Voice,voices_per_limb> voices_{};
 public:
  void note_on(uint8_t n,float value,unsigned preset,const Wavetables& t,SampleView sample)noexcept{
-  Voice* selected=&voices_[0];for(auto& v:voices_){if(!v.active){selected=&v;break;}if(v.age>selected->age)selected=&v;}
+  // Prefer: (1) free voice, (2) oldest releasing voice (quietest -> zero click!), (3) oldest active voice.
+  Voice* selected=nullptr;
+  Voice* oldest_rel=nullptr;
+  Voice* oldest_any=&voices_[0];
+  for(auto& v:voices_){
+   if(!v.active){selected=&v;break;}
+   if(v.envelope.releasing() && (!oldest_rel || v.age>oldest_rel->age))oldest_rel=&v;
+   if(v.age>oldest_any->age)oldest_any=&v;
+  }
+  if(!selected)selected=oldest_rel?oldest_rel:oldest_any;
   selected->start(n,value,preset,t,sample);
  }
  void note_off(uint8_t n)noexcept{for(auto& v:voices_)if(v.active&&v.note==n)v.off();}
@@ -243,8 +309,8 @@ class Reverb {
 public:
  Stereo next(Stereo input)noexcept{
   float y0=d0_[i0_],y1=d1_[i1_],y2=d2_[i2_],y3=d3_[i3_];
-  // 1-pole lowpass damping inside feedback loop for warm ambient tail.
-  constexpr float damp=0.38f,fb=0.78f;
+  // Silky 1-pole lowpass damping inside feedback loop (warm studio hall, zero high-frequency hiss).
+  constexpr float damp=0.22f,fb=0.72f;
   lp_[0]+=damp*(y0-lp_[0]);lp_[1]+=damp*(y1-lp_[1]);
   lp_[2]+=damp*(y2-lp_[2]);lp_[3]+=damp*(y3-lp_[3]);
   float a=lp_[0],b=lp_[1],c=lp_[2],d=lp_[3];
@@ -274,7 +340,7 @@ public:
   uint32_t delay_samples=std::clamp(uint32_t(seconds*sample_rate),1u,max_delay-1);
   uint32_t read=(write_+max_delay-delay_samples)%max_delay;
   float dl=left_[read],dr=right_[read];
-  constexpr float damp=0.45f,fb=0.42f;
+  constexpr float damp=0.30f,fb=0.36f;
   lp_l_+=damp*(dl-lp_l_);lp_r_+=damp*(dr-lp_r_);
   left_[write_]=input.l+lp_r_*fb;
   right_[write_]=input.r+lp_l_*fb;

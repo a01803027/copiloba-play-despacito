@@ -10,7 +10,9 @@ import sys
 import threading
 import time
 from .brain import Composer
+from .diagnose import write_report
 from .features import FeatureExtractor, mock_features
+from .recorder import SessionRecorder
 from .styles import STYLE_ORDER
 from .ipc import Bridge
 from .cameras import resolve_camera
@@ -53,7 +55,7 @@ def handle_window_key(key, composer):
     return False
 
 
-def draw_hud(cv2, image, features, composer, flash_state=None):
+def draw_hud(cv2, image, features, composer, flash_state=None, rec_status=None):
     """Draw a clean, translucent full-body musical HUD onto the display frame."""
     h, w = image.shape[:2]
     overlay = image.copy()
@@ -80,9 +82,12 @@ def draw_hud(cv2, image, features, composer, flash_state=None):
     chord_name = getattr(composer, 'current_chord_name', '')
     title = f'[{style_idx}/{len(STYLE_ORDER)}] {getattr(composer, "preset", "CV-DAW")} | {composer.bpm:.0f} BPM ({bpm_tag}) | {chord_name} | {section} [{bar_num}/4]'
     cv2.putText(image, title, (34, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 244, 248), 2, cv2.LINE_AA)
+    if rec_status:
+        cv2.circle(image, (w - 255, 22), 6, (40, 40, 250), -1, cv2.LINE_AA)
+        cv2.putText(image, rec_status, (w - 242, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (80, 90, 255), 2, cv2.LINE_AA)
     cv2.putText(image, status_text, (w - 135, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.44, status_color, 1, cv2.LINE_AA)
 
-    footer = 'Estilos: [N/P] o [1-9,0,-,=] (12 estilos)  |  [T] Lock BPM  |  [q] Salir'
+    footer = 'Estilos: [1] Ambient [2] House [3] Lo-Fi [4] Latin [5] Synthwave [6] DnB  |  [N/P]  [T] Lock BPM  [q] Salir'
     cv2.putText(image, footer, (16, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (215, 222, 232), 1, cv2.LINE_AA)
 
     if not features.tracked:
@@ -98,11 +103,13 @@ def draw_hud(cv2, image, features, composer, flash_state=None):
         )
         return image
 
+    legs_label = f'Piernas ({features.legs_source[:3].upper()})' if features.legs_visible else 'Piernas (NO)'
     meters = (
         ('Energia', features.energy, (60, 210, 255)),
         ('Brazo Izq', features.left_height, (130, 220, 255)),
         ('Brazo Der', features.right_height, (220, 130, 245)),
         ('Hombros', max(features.shoulder_lift, features.shoulder_bounce), (70, 220, 150)),
+        (legs_label, features.leg_energy, (255, 185, 70) if features.legs_visible else (110, 110, 120)),
     )
     bar_w = max(70, (w - 52) // len(meters) - 16)
     for idx, (label, val, color) in enumerate(meters):
@@ -115,13 +122,14 @@ def draw_hud(cv2, image, features, composer, flash_state=None):
             cv2.rectangle(image, (x0, y0), (x0 + fill, y0 + 10), color, -1)
 
     body_line = (
-        f'Cabeza tilt:{features.head_tilt:+.2f} pitch:{features.head_pitch:.2f}  |  '
+        f'Cabeza tilt:{features.head_tilt:+.2f}  |  '
         f'Hombros shrug:{features.shoulder_lift:.2f} bounce:{features.shoulder_bounce:.2f}  |  '
-        f'Cadera sway:{features.hip_sway:+.2f} nivel:{features.body_level:.2f}'
+        f'Cadera sway:{features.hip_sway:+.2f}  |  '
+        f'Piernas:{"OK(" + features.legs_source + ") stance:" + f"{features.stance_width:.2f}" if features.legs_visible else "aleja camara para ver rodillas/pies"}'
     )
-    cv2.putText(image, body_line, (16, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (185, 205, 225), 1, cv2.LINE_AA)
+    cv2.putText(image, body_line, (16, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (185, 205, 225), 1, cv2.LINE_AA)
 
-    # Live expressive badges so the user immediately sees Head & Shoulder musical triggers.
+    # Live expressive badges so the user immediately sees Head, Shoulder, Arm & Leg triggers.
     badges = []
     if section == 'BUILDUP':
         badges.append(('SHRUG BUILD-UP!', (40, 195, 255)))
@@ -133,7 +141,13 @@ def draw_hud(cv2, image, features, composer, flash_state=None):
         badges.append(('SHOULDER GROOVE', (100, 240, 180)))
     if flash_state:
         now = time.monotonic()
-        for key_name, color in (('nod', (100, 255, 130)), ('left', (80, 235, 255)), ('right', (255, 165, 235))):
+        for key_name, color in (
+            ('nod', (100, 255, 130)),
+            ('left', (80, 235, 255)),
+            ('right', (255, 165, 235)),
+            ('l_leg', (255, 190, 80)),
+            ('r_leg', (90, 220, 255)),
+        ):
             txt, until = flash_state.get(key_name, ('', 0.0))
             if now < until and txt:
                 badges.append((txt, color))
@@ -202,7 +216,10 @@ def start_engine(args):
             Path(args.record).parent.mkdir(parents=True,exist_ok=True)
             command+=['--render',args.record]
     elif args.record:
-        raise ValueError('--record requiere --offline-audio: nunca se escribe un archivo desde el callback')
+        raise ValueError('--record requiere --offline-audio: usa --diagnose para grabar audio en vivo')
+    if getattr(args, 'live_record', None) and not args.offline_audio:
+        Path(args.live_record).parent.mkdir(parents=True, exist_ok=True)
+        command += ['--live-record', str(args.live_record)]
     if args.seconds and not args.offline_audio:
         command+=['--seconds',str(args.seconds+10)]
     process=subprocess.Popen(command,cwd=ROOT,stdout=subprocess.PIPE,text=True,bufsize=1)
@@ -302,21 +319,44 @@ def main():
     p.add_argument('--library',default=str(build_dir/f'libcv_daw_ipc.{suffix}'))
     p.add_argument('--offline-audio',action='store_true',help='Prueba sin dispositivo de audio')
     p.add_argument('--record',help='WAV de integración offline, con IPC y compositor Python')
+    p.add_argument('--diagnose',nargs='?',const=15.0,type=float,default=None,help='Graba clip de diagnóstico en vivo (WAV + traza JSONL + reporte .md); por defecto 15 s')
+    p.add_argument('--diagnose-dir',type=Path,default=ROOT/'artifacts',help='Carpeta de salida para los archivos de --diagnose')
     p.add_argument('--no-window',action='store_true')
     p.add_argument('--metrics',type=Path)
     args=p.parse_args()
+    args.live_record = None
+    diag_jsonl = None
+    diag_wav = None
+    if args.diagnose is not None:
+        if not math.isfinite(args.diagnose) or args.diagnose <= 0:
+            p.error('--diagnose requiere una duración positiva en segundos (p. ej. --diagnose 15)')
+        if not args.launch_engine:
+            p.error('--diagnose requiere --launch-engine para capturar el audio en vivo')
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        args.diagnose_dir.mkdir(parents=True, exist_ok=True)
+        diag_jsonl = args.diagnose_dir / f'diag_{args.genre}_{stamp}.jsonl'
+        diag_wav = args.diagnose_dir / f'diag_{args.genre}_{stamp}.wav'
+        if args.offline_audio:
+            args.record = str(diag_wav)
+        else:
+            args.live_record = str(diag_wav)
+        if not args.seconds:
+            args.seconds = args.diagnose
     if not math.isfinite(args.seconds) or args.seconds<0:
         p.error('--seconds debe ser un número no negativo')
     if args.mode=='video' and not args.video:
         p.error('--mode video requiere --video archivo.mp4')
     if (args.record or args.offline_audio) and not args.launch_engine:
         p.error('--record y --offline-audio requieren --launch-engine')
-    process=None;bridge=None;capture=None;detector=None;pose_worker=None;cv2=None
+    process=None;bridge=None;capture=None;detector=None;pose_worker=None;recorder=None;cv2=None
     started=time.monotonic();frames=0;tracked_frames=0;max_loop=0;energies=[];probes=[];notes=0
     composer=Composer(args.seed,genre=args.genre,tempo_lock=args.tempo_lock);extractor=FeatureExtractor()
-    flash_state={'left':('',0.0),'right':('',0.0),'nod':('',0.0)}
+    flash_state={'left':('',0.0),'right':('',0.0),'nod':('',0.0),'l_leg':('',0.0),'r_leg':('',0.0)}
     report={}
     try:
+        if diag_jsonl is not None:
+            recorder=SessionRecorder(diag_jsonl,diag_wav,{'mode':args.mode,'initial_style':args.genre,'pose_model':args.pose_model})
+            print(f'Grabando sesión de diagnóstico ({args.seconds:.0f}s) -> {diag_wav} + {diag_jsonl}',flush=True)
         # Open vision before starting audio so permission prompts never leave a
         # playing background child. Uses modern MediaPipe Tasks PoseLandmarker.
         if args.mode!='mock':
@@ -345,20 +385,26 @@ def main():
             cv2.namedWindow('CV-DAW Contemporary Ambient',cv2.WINDOW_NORMAL)
             cv2.resizeWindow('CV-DAW Contemporary Ambient',960,720)
             print('Vista de vídeo abierta. Selecciona la ventana y pulsa q para salir.',flush=True)
-        print(f'{composer.preset} — mueve brazos, cabeza, torso y cadera; 1-4 género, T lock BPM, q salir.',flush=True)
+        print(f'{composer.preset} — mueve brazos, cabeza, torso y cadera; 1-6 o N/P estilo, T lock BPM, q salir.',flush=True)
         last_pose_seq=0
         last_features=extractor.missing()
+        last_points=None
         while not args.seconds or time.monotonic()-started<args.seconds:
             begin=time.monotonic()
             if process and process.poll() is not None:
                 raise RuntimeError('El motor se detuvo durante la ejecución')
             elapsed=begin-started
+            rec_label=f'REC {elapsed:04.1f}/{args.seconds:.0f}s' if recorder and args.seconds else ('REC' if recorder else None)
+            is_new_pose=False
             if args.mode=='mock':
                 features=mock_features(elapsed)
+                is_new_pose=True
             elif args.mode=='camera':
                 polled=pose_worker.poll(last_pose_seq)
                 if polled is not None:
                     last_pose_seq,timestamp,image,points=polled
+                    last_points=points
+                    is_new_pose=True
                     needed=(11,12,23,24)
                     if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
                         features=extractor.update(points,timestamp,image.shape[0]/image.shape[1],bpm_range=composer.bpm_sync_range())
@@ -366,20 +412,33 @@ def main():
                         features=extractor.missing(timestamp)
                     last_features=features
                     if features.left_strike!=0:
-                        flash_state['left']=(f'IZQ {"ARRIBA" if features.left_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                        flash_state['left']=(f'PUNCH IZQ {"UP" if features.left_strike>0 else "DROP"}!',time.monotonic()+0.35)
                     if features.right_strike!=0:
-                        flash_state['right']=(f'DER {"ARRIBA" if features.right_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                        flash_state['right']=(f'PUNCH DER {"UP" if features.right_strike>0 else "HIT"}!',time.monotonic()+0.35)
+                    if features.left_leg_strike:
+                        flash_state['l_leg']=('PIE IZQ SNARE!',time.monotonic()+0.32)
+                    if features.right_leg_strike:
+                        flash_state['r_leg']=('PIE DER KICK!',time.monotonic()+0.32)
                     if features.head_nod:
                         flash_state['nod']=('HEAD NOD!',time.monotonic()+0.30)
                     if not args.no_window:
                         detector.draw(image,points)
                         display=cv2.flip(image,1) if not args.no_mirror else image
-                        draw_hud(cv2,display,features,composer,flash_state)
+                        draw_hud(cv2,display,features,composer,flash_state,rec_label)
                         cv2.imshow('CV-DAW Contemporary Ambient',display)
                 else:
                     # Keep musical clock ticking smoothly without duplicating one-shot events.
-                    if (last_features.left_strike!=0 or last_features.right_strike!=0 or last_features.head_nod or last_features.shoulder_drop):
-                        features=last_features.__class__(**{**last_features.to_dict(),'left_strike':0,'right_strike':0,'head_nod':False,'shoulder_drop':False})
+                    if (
+                        last_features.left_strike!=0 or last_features.right_strike!=0
+                        or last_features.left_leg_strike or last_features.right_leg_strike
+                        or last_features.head_nod or last_features.shoulder_drop
+                    ):
+                        features=last_features.__class__(**{
+                            **last_features.to_dict(),
+                            'left_strike':0,'right_strike':0,
+                            'left_leg_strike':False,'right_leg_strike':False,
+                            'head_nod':False,'shoulder_drop':False,
+                        })
                     else:
                         features=last_features
                 if not args.no_window:
@@ -392,30 +451,48 @@ def main():
                     break
                 timestamp=time.monotonic()
                 points=detector.process(image,timestamp)
+                last_points=points
+                is_new_pose=True
                 needed=(11,12,23,24)
                 if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
                     features=extractor.update(points,timestamp,image.shape[0]/image.shape[1],bpm_range=composer.bpm_sync_range())
                 else:
                     features=extractor.missing(timestamp)
                 if features.left_strike!=0:
-                    flash_state['left']=(f'IZQ {"ARRIBA" if features.left_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                    flash_state['left']=(f'PUNCH IZQ {"UP" if features.left_strike>0 else "DROP"}!',time.monotonic()+0.35)
                 if features.right_strike!=0:
-                    flash_state['right']=(f'DER {"ARRIBA" if features.right_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                    flash_state['right']=(f'PUNCH DER {"UP" if features.right_strike>0 else "HIT"}!',time.monotonic()+0.35)
+                if features.left_leg_strike:
+                    flash_state['l_leg']=('PIE IZQ SNARE!',time.monotonic()+0.32)
+                if features.right_leg_strike:
+                    flash_state['r_leg']=('PIE DER KICK!',time.monotonic()+0.32)
                 if features.head_nod:
                     flash_state['nod']=('HEAD NOD!',time.monotonic()+0.30)
                 if not args.no_window:
                     detector.draw(image,points)
-                    draw_hud(cv2,image,features,composer,flash_state)
+                    draw_hud(cv2,image,features,composer,flash_state,rec_label)
                     cv2.imshow('CV-DAW Contemporary Ambient',image)
                     key=cv2.waitKey(1)&0xff
                     if handle_window_key(key,composer):
                         break
             frame=bridge.metric(0)
             events=composer.update(features,frame,elapsed)
-            bridge.controls(composer.controls(features))
+            ctrl=composer.controls(features)
+            bridge.controls(ctrl)
             for event in events:
                 bridge.send(event)
                 notes+=event.kind==0
+            if recorder is not None:
+                recorder.record_frame(
+                    elapsed_s=elapsed,
+                    audio_frame=frame,
+                    is_new_pose=is_new_pose,
+                    points=last_points,
+                    features=features,
+                    composer=composer,
+                    controls=ctrl,
+                    events=events,
+                )
             tracked_frames+=features.tracked
             energies.append(features.energy)
             frames+=1
@@ -446,6 +523,9 @@ def main():
     except KeyboardInterrupt:
         print('Deteniendo compositor...')
     finally:
+        if recorder is not None:
+            recorder.record_footer(report)
+            recorder.close()
         if bridge:
             bridge.close()
         if process:
@@ -464,6 +544,11 @@ def main():
             detector.close()
         if cv2:
             cv2.destroyAllWindows()
+    if diag_jsonl is not None and diag_jsonl.is_file():
+        diag,report_md=write_report(diag_jsonl,diag_wav if (diag_wav and diag_wav.is_file()) else None)
+        print(f'\n=== DIAGNÓSTICO GUARDADO ===\nWAV:     {diag_wav}\nJSONL:   {diag_jsonl}\nREPORTE: {report_md}',flush=True)
+        for item in diag['findings']:
+            print(f'  * {item}',flush=True)
     if report:
         print(json.dumps(report,indent=2))
         if args.metrics:

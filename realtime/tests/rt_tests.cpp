@@ -132,8 +132,12 @@ int main(){
   CHECK(local->commands.try_push({LimbID::L_ARM,EventType::PRESET_CHANGE,8,0,0,0}));
   CHECK(local->commands.try_push({LimbID::R_LEG,EventType::PRESET_CHANGE,12,0,0,0}));
   CHECK(local->commands.try_push({LimbID::L_ARM,EventType::NOTE_ON,48,0,.7f,0}));
-  for(uint8_t drum_note:{uint8_t(36),uint8_t(38),uint8_t(42),uint8_t(46)})
+  for(uint8_t drum_note:{uint8_t(36),uint8_t(38),uint8_t(42),uint8_t(46),uint8_t(49)})
    CHECK(local->commands.try_push({LimbID::R_LEG,EventType::NOTE_ON,drum_note,0,.85f,0}));
+  CHECK(local->commands.try_push({LimbID::R_ARM,EventType::PRESET_CHANGE,13,0,0,0}));
+  CHECK(local->commands.try_push({LimbID::R_ARM,EventType::NOTE_ON,67,0,.8f,0}));
+  CHECK(local->commands.try_push({LimbID::L_LEG,EventType::PRESET_CHANGE,14,0,0,0}));
+  CHECK(local->commands.try_push({LimbID::L_LEG,EventType::NOTE_ON,64,0,.8f,0}));
   float peak=0;
   for(unsigned i=0;i<20;++i){
    no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;

@@ -85,6 +85,17 @@ class Features:
     hip_bounce_vel: float = 0.0
     body_level: float = 0.5       # 0 crouched low .. 1 standing/elevated
     lateral_balance: float = 0.0  # -1 left .. +1 right
+    # Full-body Legs & Footwork (ankles 27/28 with automatic fallback to knees 25/26)
+    legs_visible: bool = False
+    legs_source: str = 'none'     # 'ankles' | 'knees' | 'none'
+    left_leg_lift: float = 0.0    # 0 planted .. 1 knee/foot lifted high
+    right_leg_lift: float = 0.0
+    left_leg_speed: float = 0.0
+    right_leg_speed: float = 0.0
+    leg_energy: float = 0.0       # 0..1 smoothed footwork activity
+    stance_width: float = 0.35    # 0 narrow .. 1 wide power dance stance
+    left_leg_strike: bool = False  # discrete left stomp / step / kick onset
+    right_leg_strike: bool = False # discrete right stomp / step / kick onset
     # Multi-source detected body rhythm
     body_bpm: float = 100.0
     body_bpm_confidence: float = 0.0
@@ -108,11 +119,17 @@ def _elbow_bend(root, joint, tip) -> float:
 
 
 class FeatureExtractor:
-    def __init__(self, missing_grace_seconds: float = 0.30, strike_cooldown: float = 0.18):
+    def __init__(self, missing_grace_seconds: float = 0.30, strike_cooldown: float = 0.45):
         self.missing_grace_seconds = missing_grace_seconds
         self.strike_cooldown = strike_cooldown
-        # Agile One-Euro filters for extremities (low lag for rapid arm gestures).
-        self._filters = [OneEuroFilter3D(min_cutoff=1.5, beta=0.35, d_cutoff=1.2) for _ in range(4)]
+        self.leg_strike_cooldown = 0.40
+        # Agile One-Euro filters for arms (0,1); calmer filters for legs (2,3) to reject standing knee jitter.
+        self._filters = [
+            OneEuroFilter3D(min_cutoff=1.5, beta=0.35, d_cutoff=1.2),
+            OneEuroFilter3D(min_cutoff=1.5, beta=0.35, d_cutoff=1.2),
+            OneEuroFilter3D(min_cutoff=1.1, beta=0.18, d_cutoff=1.0),
+            OneEuroFilter3D(min_cutoff=1.1, beta=0.18, d_cutoff=1.0),
+        ]
         # Stable One-Euro filters for head, shoulders, hips.
         self._nose_filter = OneEuroFilter3D(min_cutoff=1.3, beta=0.18, d_cutoff=1.0)
         self._hip_filter = OneEuroFilter3D(min_cutoff=1.3, beta=0.18, d_cutoff=1.0)
@@ -123,14 +140,24 @@ class FeatureExtractor:
         self.last_time = None
         self.last_valid_time = None
         self.energy = 0.
+        self.leg_energy = 0.
         self.previous_valid = [False] * 4
+        self.prev_leg_indices = [25, 26]
         self.last_strike_time = [-1e9, -1e9]
         self.in_surge = [False, False]
+        self.last_leg_strike_time = [-1e9, -1e9]
+        self.leg_armed = [False, False]
+        self.leg_y_baseline = [None, None]
+        self.last_left_leg_lift = 0.0
+        self.last_right_leg_lift = 0.0
+        self.last_stance_width = 0.35
         self.prev_hip_x = None
         self.hip_x_baseline = None
+        self.hip_y_baseline = None
         self.prev_hip_y = None
         self.prev_nose_rel_y = None
         self.neck_baseline = None
+        self.ear_neck_baseline = None
         self.shrug_armed = False
         self.last_shoulder_drop = -1e9
         self.last_head_nod = -1e9
@@ -142,7 +169,7 @@ class FeatureExtractor:
         self.last_expansion = .3
         self.last_left_height = .5
         self.last_right_height = .5
-        self.last_body_level = .5
+        self.last_body_level = .65
         self.last_lateral_balance = 0.
         self.last_head_pitch = .5
         self.last_head_tilt = 0.
@@ -161,8 +188,15 @@ class FeatureExtractor:
         self.previous = self.velocity = self.last_time = self.last_valid_time = None
         self.previous_valid = [False] * 4
         self.in_surge = [False, False]
-        self.prev_hip_x = self.hip_x_baseline = self.prev_hip_y = self.prev_nose_rel_y = None
+        self.leg_armed = [False, False]
+        self.leg_y_baseline = [None, None]
+        self.leg_energy = 0.
+        self.last_left_leg_lift = 0.0
+        self.last_right_leg_lift = 0.0
+        self.last_stance_width = 0.35
+        self.prev_hip_x = self.hip_x_baseline = self.hip_y_baseline = self.prev_hip_y = self.prev_nose_rel_y = None
         self.neck_baseline = None
+        self.ear_neck_baseline = None
         self.shrug_armed = False
         self.in_head_nod = False
         self.prev_shoulder_tilt = 0.0
@@ -214,6 +248,12 @@ class FeatureExtractor:
             hip_sway=self.last_hip_sway * decay,
             body_level=self.last_body_level,
             lateral_balance=self.last_lateral_balance,
+            legs_visible=held.legs_visible,
+            legs_source=held.legs_source,
+            left_leg_lift=self.last_left_leg_lift * decay,
+            right_leg_lift=self.last_right_leg_lift * decay,
+            leg_energy=self.leg_energy * decay,
+            stance_width=self.last_stance_width,
             body_bpm=self.tempo_tracker.bpm,
             body_bpm_confidence=self.tempo_tracker.confidence * decay,
             body_bpm_source=self.tempo_tracker.source,
@@ -232,7 +272,25 @@ class FeatureExtractor:
         if scale < .025:
             return self.missing(timestamp)
 
-        positions = [tuple((xyz[i][j] - hip[j]) / scale for j in range(3)) for i in (15, 16, 27, 28)]
+        vis = [len(points[i]) < 4 or points[i][3] >= .5 for i in range(33)]
+        vis_ankle = [len(points[i]) < 4 or points[i][3] >= .65 for i in range(33)]
+        vis_knee = [len(points[i]) < 4 or points[i][3] >= .50 for i in range(33)]
+        # Stable leg landmark selection: use ankles ONLY when BOTH ankles are clearly visible (>=0.65),
+        # otherwise stay locked cleanly on knees (25, 26) to avoid ankles<->knees switching jitter!
+        both_ankles_ok = vis_ankle[27] and vis_ankle[28]
+        knees_ok = vis_knee[25] or vis_knee[26]
+        if both_ankles_ok:
+            leg_indices = [27, 28]
+            legs_source = 'ankles'
+        elif knees_ok:
+            leg_indices = [25, 26]
+            legs_source = 'knees'
+        else:
+            leg_indices = [25, 26]
+            legs_source = 'none'
+
+        limb_indices = (15, 16, leg_indices[0], leg_indices[1])
+        positions = [tuple((xyz[i][j] - hip[j]) / scale for j in range(3)) for i in limb_indices]
         dt = timestamp - self.last_time if self.last_time is not None else 1 / 30
         if dt <= 0:
             return self.last_features or Features(energy=self.energy, stillness=1 - self.energy)
@@ -241,8 +299,19 @@ class FeatureExtractor:
             dt = 1 / 30
         clamped_dt = min(dt, .2)
 
-        vis = [len(points[i]) < 4 or points[i][3] >= .5 for i in range(33)]
-        active = [vis[i] for i in (15, 16, 27, 28)]
+        # Reset leg filters/baselines smoothly if leg tracking switched between knees and ankles.
+        for side in (0, 1):
+            if leg_indices[side] != self.prev_leg_indices[side]:
+                self._filters[2 + side].reset()
+                self.previous_valid[2 + side] = False
+                self.leg_y_baseline[side] = None
+                self.leg_armed[side] = False
+                self.prev_leg_indices[side] = leg_indices[side]
+
+        leg_ok_l = vis_ankle[27] if legs_source == 'ankles' else (vis_knee[25] if legs_source == 'knees' else False)
+        leg_ok_r = vis_ankle[28] if legs_source == 'ankles' else (vis_knee[26] if legs_source == 'knees' else False)
+        active = [vis[15], vis[16], leg_ok_l, leg_ok_r]
+        legs_visible = active[2] or active[3]
         smoothed = []
         velocities = []
         for i, new in enumerate(positions):
@@ -295,9 +364,10 @@ class FeatureExtractor:
             accel = per_limb_accel[arm]
             decel = per_limb_decel[arm]
 
-            # 1) Fast acceleration surge OR 2) sharp braking / direction reversal after fast swing.
-            surge = cur_spd > 1.05 and accel > 10.0
-            brake_hit = prev_spd > 1.15 and (decel < -10.0 or (abs(prev_vy) > 0.9 and cur_vy * prev_vy < 0))
+            # 1) Deliberate fast acceleration punch OR 2) sharp braking / direction snap.
+            # High thresholds prevent false triggers during smooth dancing so ONLY intentional punches fire!
+            surge = cur_spd > 3.1 and accel > 35.0
+            brake_hit = prev_spd > 3.2 and (decel < -34.0 or (abs(prev_vy) > 2.4 and cur_vy * prev_vy < 0))
             triggered = (surge and not self.in_surge[arm]) or brake_hit
             self.in_surge[arm] = surge
 
@@ -305,14 +375,60 @@ class FeatureExtractor:
                 # Choose vertical direction from whichever phase had stronger vertical motion.
                 dom_vy = cur_vy if abs(cur_vy) >= abs(prev_vy) else prev_vy
                 direction = 1 if dom_vy >= 0.0 else -1
-                strength = clamp((max(cur_spd, prev_spd) - 0.8) / 3.2, 0.2, 1.0)
+                strength = clamp((max(cur_spd, prev_spd) - 2.0) / 3.0, 0.40, 1.0)
                 strikes[arm] = direction
                 strike_strengths[arm] = strength
                 self.last_strike_time[arm] = timestamp
 
-        # Asymmetric energy envelope: fast attack (85 ms), smooth release (350 ms).
-        target_energy = clamp(speed / 2.6)
-        tau = 0.085 if target_energy > self.energy else 0.35
+        # --- Full-body Leg & Footwork dynamics (lifts, stance width, clean leg energy, real stomps/steps) ---
+        leg_lifts = [0.0, 0.0]
+        leg_strikes = [False, False]
+        for side in (0, 1):
+            idx = 2 + side
+            if not active[idx]:
+                self.leg_armed[side] = False
+                continue
+            # Hip-relative y grows downward (planted leg ~ +1.0 knee / +1.9 ankle; lifted leg decreases y).
+            cur_y = positions[idx][1]
+            if self.leg_y_baseline[side] is None:
+                self.leg_y_baseline[side] = cur_y
+            else:
+                # Track planted floor position: adapt faster downward (planting foot), slower upward.
+                b_tau = 0.55 if cur_y > self.leg_y_baseline[side] else 3.5
+                self.leg_y_baseline[side] += (1.0 - math.exp(-clamped_dt / b_tau)) * (cur_y - self.leg_y_baseline[side])
+            lift_scale = 0.40 if legs_source == 'knees' else 0.52
+            lift = clamp((self.leg_y_baseline[side] - cur_y) / lift_scale)
+            leg_lifts[side] = lift
+
+            # Arm stomp detector ONLY on a real visible knee/foot lift (>= 0.28) — zero false triggers at lift=0!
+            if lift >= 0.28:
+                self.leg_armed[side] = True
+            if self.leg_armed[side] and self.previous_valid[idx] and self.velocity is not None:
+                l_vy = -velocities[idx][1]  # +up, -down stomp
+                landed = lift <= 0.16 or (l_vy < -1.05 and lift <= 0.30)
+                high_kick = lift >= 0.55 and l_vy > 1.10
+                if (landed or high_kick) and (timestamp - self.last_leg_strike_time[side]) >= self.leg_strike_cooldown:
+                    leg_strikes[side] = True
+                    self.last_leg_strike_time[side] = timestamp
+                    self.leg_armed[side] = False
+            elif lift < 0.08:
+                self.leg_armed[side] = False
+
+        self.last_left_leg_lift = leg_lifts[0] if active[2] else self.last_left_leg_lift * math.exp(-clamped_dt / 0.25)
+        self.last_right_leg_lift = leg_lifts[1] if active[3] else self.last_right_leg_lift * math.exp(-clamped_dt / 0.25)
+        if active[2] and active[3]:
+            raw_stance = abs(positions[2][0] - positions[3][0])
+            self.last_stance_width = clamp((raw_stance - 0.18) / 0.85)
+        raw_leg_speed = 0.5 * (limb_speeds[2] + limb_speeds[3]) if (active[2] and active[3]) else max(limb_speeds[2], limb_speeds[3])
+        # Deadzone (0.35) eliminates standing pose jitter so still legs read ~0.0 and stepping reads 0.45..0.95!
+        clean_leg_spd = max(0.0, raw_leg_speed - 0.35)
+        target_leg_energy = clamp((clean_leg_spd / 2.2) + 0.55 * max(self.last_left_leg_lift, self.last_right_leg_lift)) if legs_visible else 0.0
+        leg_tau = 0.10 if target_leg_energy > self.leg_energy else 0.32
+        self.leg_energy += (1.0 - math.exp(-clamped_dt / leg_tau)) * (target_leg_energy - self.leg_energy)
+
+        # Asymmetric energy envelope scaled to preserve dynamic range (calm ~0.15, dance ~0.50, intense ~0.95).
+        target_energy = clamp(speed / 5.4 + (0.20 * self.leg_energy if legs_visible else 0.0))
+        tau = 0.10 if target_energy > self.energy else 0.38
         self.energy += (1.0 - math.exp(-clamped_dt / tau)) * (target_energy - self.energy)
 
         if active[0] and active[1]:
@@ -343,9 +459,9 @@ class FeatureExtractor:
             self.last_head_pitch = clamp((nose_rel_y - 0.22) / 0.48)
             if self.prev_nose_rel_y is not None:
                 head_nod_vel = (nose_rel_y - self.prev_nose_rel_y) / dt
-                # Crisp downward head nod detection with rising-edge hysteresis + 200ms cooldown.
-                nodding_now = head_nod_vel < -0.55
-                if nodding_now and not self.in_head_nod and (timestamp - self.last_head_nod) >= 0.20:
+                # Intentional crisp downward head nod with 450ms cooldown (calibrated against live traces).
+                nodding_now = head_nod_vel < -1.15
+                if nodding_now and not self.in_head_nod and (timestamp - self.last_head_nod) >= 0.45:
                     head_nod = True
                     self.last_head_nod = timestamp
                 self.in_head_nod = nodding_now
@@ -369,19 +485,42 @@ class FeatureExtractor:
         # --- Shoulder features (shrug lift -> build-up/drop, alternating tilt/bounce -> groove) ---
         shoulder_drop = False
         if vis[0]:
+            avg_arm_h = 0.5 * (self.last_left_height + self.last_right_height)
+            ear_rel_y = None
+            look_suppress = 1.0
+            if vis[7] and vis[8]:
+                ear_mid_y = 0.5 * (xyz[7][1] + xyz[8][1])
+                ear_rel_y = (shoulder[1] - ear_mid_y) / scale
+                # Suppress false shrugs when looking down (nose drops below ears while shoulders stay put!).
+                nose_below_ears = (nose_f[1] - ear_mid_y) / scale
+                look_suppress = clamp((0.12 - nose_below_ears) / 0.08)
             if self.neck_baseline is None:
                 self.neck_baseline = nose_rel_y
-            elif self.shoulder_lift < 0.25:
-                # Slowly adapt relaxed neck baseline only when not shrugging (tau ~ 4.0s).
-                self.neck_baseline += (1.0 - math.exp(-clamped_dt / 4.0)) * (nose_rel_y - self.neck_baseline)
-            # Shrugging lifts shoulders toward nose -> nose_rel_y decreases relative to baseline.
-            shrug_delta = self.neck_baseline - nose_rel_y
-            raw_lift = clamp((shrug_delta - 0.025) / 0.12)
-            lift_tau = 0.07 if raw_lift > self.shoulder_lift else 0.12
+                if ear_rel_y is not None:
+                    self.ear_neck_baseline = ear_rel_y
+            elif self.shoulder_lift < 0.25 and avg_arm_h < 0.60:
+                # Slowly adapt relaxed neck baseline only when arms are down and not shrugging.
+                adapt = 1.0 - math.exp(-clamped_dt / 4.0)
+                self.neck_baseline += adapt * (nose_rel_y - self.neck_baseline)
+                if ear_rel_y is not None:
+                    if self.ear_neck_baseline is None:
+                        self.ear_neck_baseline = ear_rel_y
+                    else:
+                        self.ear_neck_baseline += adapt * (ear_rel_y - self.ear_neck_baseline)
+            # Decouple anatomical shoulder rise when raising arms overhead (avg_arm_h > 0.62 -> not a shrug!).
+            arm_suppress = clamp((0.78 - avg_arm_h) / 0.18)
+            nose_shrug = self.neck_baseline - nose_rel_y
+            if ear_rel_y is not None and self.ear_neck_baseline is not None:
+                # A REAL shrug lifts shoulders toward BOTH nose and ears equally!
+                shrug_delta = min(nose_shrug, self.ear_neck_baseline - ear_rel_y)
+            else:
+                shrug_delta = nose_shrug
+            raw_lift = clamp((shrug_delta - 0.04) / 0.12) * arm_suppress * look_suppress
+            lift_tau = 0.08 if raw_lift > self.shoulder_lift else 0.12
             self.shoulder_lift += (1.0 - math.exp(-clamped_dt / lift_tau)) * (raw_lift - self.shoulder_lift)
-            if self.shoulder_lift >= 0.55:
+            if self.shoulder_lift >= 0.62:
                 self.shrug_armed = True
-            elif self.shrug_armed and self.shoulder_lift <= 0.26 and (timestamp - self.last_shoulder_drop) >= 0.45:
+            elif self.shrug_armed and self.shoulder_lift <= 0.25 and (timestamp - self.last_shoulder_drop) >= 0.65:
                 shoulder_drop = True
                 self.shrug_armed = False
                 self.last_shoulder_drop = timestamp
@@ -411,10 +550,17 @@ class FeatureExtractor:
         twist_from_z = clamp((sh_dz - 0.15) / 0.65)
         self.last_torso_twist = clamp(max(twist_from_width, twist_from_z))
 
-        # --- Hip features (bounce, lateral sway, vertical level) ---
+        # --- Hip features (bounce, lateral sway, adaptive relative body level) ---
         hip_f = self._hip_filter.filter(hip, clamped_dt)
         raw_hip_y = (points[23][1] + points[24][1]) * 0.5
-        self.last_body_level = clamp(1.0 - raw_hip_y)
+        if self.hip_y_baseline is None:
+            self.hip_y_baseline = raw_hip_y
+        else:
+            # Slow baseline (tau ~ 5.0s) so sitting/framing near bottom never darkens filters;
+            # only actively crouching lowers body_level below 0.65.
+            self.hip_y_baseline += (1.0 - math.exp(-clamped_dt / 5.0)) * (raw_hip_y - self.hip_y_baseline)
+        rel_elev = (self.hip_y_baseline - raw_hip_y) / max(scale, 0.05)
+        self.last_body_level = clamp(0.65 + rel_elev * 0.90, 0.15, 1.0)
 
         if self.hip_x_baseline is None:
             self.hip_x_baseline = hip_f[0]
@@ -439,14 +585,16 @@ class FeatureExtractor:
         left_impulse = clamp((per_limb_accel[0] - 10.0) / 28.0) if active[0] else 0.0
         right_impulse = clamp((per_limb_accel[1] - 10.0) / 28.0) if active[1] else 0.0
 
-        # Multi-source BPM tracker (hip bounce + head nod + shoulder bounce + rhythmic arm speed).
+        # Multi-source BPM tracker (legs footwork + hip bounce + head nod + shoulder bounce + rhythmic arm speed).
         arm_avg_speed = 0.5 * (limb_speeds[0] + limb_speeds[1])
+        leg_pulse = (self.last_left_leg_lift + self.last_right_leg_lift + 0.30 * (limb_speeds[2] + limb_speeds[3])) if legs_visible else 0.0
         body_bpm, body_bpm_conf = self.tempo_tracker.update(
             timestamp,
             hip_y=hip_f[1] / scale,
             head_y=nose_rel_y,
             arm_speed=arm_avg_speed,
             shoulder_tilt=self.last_shoulder_tilt,
+            leg_pulse=leg_pulse,
             bpm_min=bpm_range[0],
             bpm_max=bpm_range[1],
         )
@@ -519,6 +667,16 @@ class FeatureExtractor:
             hip_bounce_vel=hip_bounce_vel,
             body_level=self.last_body_level,
             lateral_balance=self.last_lateral_balance,
+            legs_visible=legs_visible,
+            legs_source=legs_source,
+            left_leg_lift=self.last_left_leg_lift,
+            right_leg_lift=self.last_right_leg_lift,
+            left_leg_speed=limb_speeds[2],
+            right_leg_speed=limb_speeds[3],
+            leg_energy=self.leg_energy,
+            stance_width=self.last_stance_width,
+            left_leg_strike=leg_strikes[0],
+            right_leg_strike=leg_strikes[1],
             body_bpm=body_bpm,
             body_bpm_confidence=body_bpm_conf,
             body_bpm_source=self.tempo_tracker.source,

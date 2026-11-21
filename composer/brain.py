@@ -12,6 +12,7 @@
 """
 from collections import deque
 from dataclasses import dataclass
+import math
 import random
 from .arrangement import PhraseSequencer, SectionController, strum_chord_schedule
 from .features import Features, clamp
@@ -70,6 +71,14 @@ class Composer:
         self.last_accent = -1e9
         self.last_left_strike = -1e9
         self.last_head_nod = -1e9
+        self.last_leg_strike = [-1e9, -1e9]
+        self.strike_punch = 0.0
+        self.strike_punch_at = -1e9
+        self._last_seconds = 0.0
+        self._peak_bpm_conf = 0.0
+        self._peak_bpm = self.profile.bpm_default
+        self._peak_bpm_source = 'none'
+        self._bpm_sync_until = -1e9
         self.presets_dirty = True
         self.skipped_ticks = 0
 
@@ -118,34 +127,50 @@ class Composer:
                 'sidechain': 0.0,
             }
 
-        in_buildup = self.section == 'BUILDUP' or features.shoulder_lift >= 0.48
+        in_buildup = self.section == 'BUILDUP' or features.shoulder_lift >= 0.62
         in_drop = self.section == 'DROP'
+        # Decaying ~240ms visceral transient punch envelope triggered by deliberate arm punches & leg stomps.
+        punch = self.strike_punch * math.exp(-max(0.0, self._last_seconds - self.strike_punch_at) / 0.16)
+        if punch < 0.01:
+            punch = 0.0
 
         # Gentle breathing ambient pad stays alive softly in complete stillness;
-        # other layers rise smoothly with energy and section.
-        pad_level = clamp(0.24 + 0.62 * features.energy + (0.12 if in_drop else 0.0))
+        # other layers obey their dedicated body zones cleanly!
+        pad_level = clamp(0.24 + 0.56 * features.energy + (0.12 if in_drop else 0.0) + 0.12 * punch)
         lead_level = clamp(
-            0.12 + 0.72 * clamp(features.energy * 1.10 + 0.25 * features.right_speed)
-        ) * (0.50 + 0.50 * features.expansion)
-        # During BUILDUP, slightly duck bass so the subsequent DROP hits hard!
-        bass_mult = 0.45 if in_buildup else (1.12 if in_drop else 1.0)
-        bass_level = clamp((0.06 + 0.78 * clamp(features.energy + 0.25 * abs(features.hip_sway) + 0.25 * features.shoulder_bounce)) * bass_mult)
-        drum_level = clamp(0.06 + 0.80 * clamp(features.energy + 0.25 * features.shoulder_bounce + (0.25 if in_buildup else 0.0)))
+            (0.10 + 0.64 * clamp(features.energy * 0.95 + 0.35 * features.right_speed)) * (0.50 + 0.50 * features.expansion)
+            + 0.26 * punch
+        )
+        # When legs are visible, YOUR LEGS DIRECTLY OWN THE RHYTHM SECTION (bass & drums)!
+        # Still legs -> drums/bass drop way back; stepping/dancing legs -> full punchy rhythm!
+        if features.legs_visible:
+            leg_bass = clamp(0.08 + 0.86 * clamp(features.leg_energy * 1.15 + 0.20 * abs(features.hip_sway) + 0.20 * max(0.0, features.stance_width - 0.35)) + 0.14 * punch)
+            leg_drum = clamp(0.04 + 0.92 * clamp(features.leg_energy * 1.18 + (0.25 if in_buildup else 0.0)) + 0.16 * punch)
+            bass_mult = 0.45 if in_buildup else (1.12 if in_drop else 1.0)
+            bass_level = clamp(leg_bass * bass_mult)
+            drum_level = leg_drum
+        else:
+            rhythm_drive = clamp(features.energy + 0.25 * abs(features.hip_sway) + 0.25 * features.shoulder_bounce)
+            bass_mult = 0.45 if in_buildup else (1.12 if in_drop else 1.0)
+            bass_level = clamp((0.06 + 0.78 * rhythm_drive + 0.14 * punch) * bass_mult)
+            drum_level = clamp(0.06 + 0.78 * clamp(rhythm_drive + (0.25 if in_buildup else 0.0)) + 0.16 * punch)
 
-        # Body vertical level (crouch -> warm sub-drop; tall -> open).
-        level_mod = 0.58 + 0.58 * features.body_level
+        # Body vertical level: neutral sitting/standing is ~0.65 (full open brightness ~1.0);
+        # actively crouching (<0.45) closes filters into a warm sub-drop.
+        level_mod = clamp(0.45 + 0.85 * features.body_level, 0.50, 1.15)
         # Shrugging shoulders up sweeps filters sharply upward for unmistakable Build-up tension!
-        shrug_sweep = 1.0 + 0.85 * features.shoulder_lift
+        shrug_sweep = 1.0 + 0.65 * features.shoulder_lift
+        stance_boost = max(0.0, features.stance_width - 0.35) if features.legs_visible else 0.0
 
-        pad_bright = clamp(0.42 * features.expansion + 0.38 * features.left_height + 0.20 * features.head_pitch)
-        pad_cut = (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright) * level_mod * shrug_sweep
-        pad_cut = clamp(pad_cut, 240.0, 14500.0)
+        pad_bright = clamp(0.32 + 0.35 * features.expansion + 0.25 * features.left_height + 0.15 * features.head_pitch)
+        pad_cut = (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright) * level_mod * shrug_sweep + 1800.0 * punch
+        pad_cut = clamp(pad_cut, 420.0, 11500.0)
 
-        lead_bright = clamp(0.45 * features.right_height + 0.25 * features.head_pitch + 0.30 * (1.0 - features.fluidity))
-        lead_cut = (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright) * level_mod * shrug_sweep
-        lead_cut = clamp(lead_cut, 350.0, 15500.0)
+        lead_bright = clamp(0.34 + 0.38 * features.right_height + 0.15 * features.head_pitch + 0.16 * (1.0 - features.fluidity))
+        lead_cut = (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright) * level_mod * shrug_sweep + 3800.0 * punch
+        lead_cut = clamp(lead_cut, 700.0, 13200.0)
 
-        rev_lift = clamp(0.65 * features.fluidity + 0.35 * features.torso_twist)
+        rev_lift = clamp(0.60 * features.fluidity + 0.40 * features.torso_twist)
         pad_rev = p.reverb_pad_range[0] + (p.reverb_pad_range[1] - p.reverb_pad_range[0]) * rev_lift
         lead_rev = p.reverb_lead_range[0] + (p.reverb_lead_range[1] - p.reverb_lead_range[0]) * rev_lift
 
@@ -153,13 +178,17 @@ class Composer:
         tilt_mag = abs(features.head_tilt)
         lead_pan = clamp(0.65 * features.head_tilt + 0.35 * features.lateral_balance, -0.88, 0.88)
         pad_pan = clamp(-0.35 * features.torso_lean - 0.25 * features.head_tilt, -0.5, 0.5)
-        delay_send = clamp(p.delay_send * (0.50 + 0.40 * features.fluidity) + 0.48 * tilt_mag, 0.0, 0.90)
+        delay_send = clamp(p.delay_send * (0.50 + 0.35 * features.fluidity) + 0.45 * tilt_mag, 0.0, 0.85)
 
-        # Shoulder shrug + torso lean build dramatic filter resonance.
-        resonance = clamp(p.resonance + 1.15 * features.shoulder_lift + 0.50 * abs(features.torso_lean), 0.65, 3.2)
-        lead_bend = clamp((features.right_bend - 0.5) * 0.5 + (1.0 - features.symmetry) * 0.12, -0.5, 0.5)
+        # Shoulder shrug + torso lean build dramatic filter resonance (capped smoothly to avoid fizz).
+        resonance = clamp(p.resonance + 1.15 * features.shoulder_lift + 0.45 * abs(features.torso_lean) + 0.25 * punch, 0.65, 2.75)
+        lead_bend = clamp((features.right_bend - 0.5) * 0.4 + (1.0 - features.symmetry) * 0.10, -0.45, 0.45)
 
-        sc_drive = clamp(0.35 + 0.55 * features.energy + (0.20 if in_drop else 0.0))
+        sc_drive = clamp(0.35 + 0.55 * features.energy + (0.20 if in_drop else 0.0) + 0.20 * punch)
+
+        # Keep Drum bus (limb 3) crisp yet strictly free of ultrasonic (>10.5 kHz) hiss, and DRY (reverb=0.02)!
+        drum_cut = clamp(7800.0 + 1800.0 * features.body_level + 1200.0 * punch, 6500.0, 10800.0)
+        bass_cut = clamp(480.0 + 1500.0 * clamp(features.energy + 0.25 * features.body_level + 0.35 * stance_boost), 260.0, 2900.0)
 
         return {
             'bpm': self.bpm,
@@ -167,11 +196,11 @@ class Composer:
             'cutoff': [
                 pad_cut,
                 lead_cut,
-                clamp(440.0 + 1850.0 * clamp(features.energy + 0.3 * features.body_level), 220.0, 3800.0),
-                clamp((3400.0 + 5500.0 * features.body_level) * (1.0 + 0.35 * features.shoulder_lift), 1800.0, 14000.0),
+                bass_cut,
+                drum_cut,
             ],
-            'reverb': [pad_rev, lead_rev, 0.06, 0.14],
-            'gain': [pad_level, lead_level, bass_level, drum_level],
+            'reverb': [pad_rev, lead_rev, 0.03, 0.02],
+            'gain': [pad_level, lead_level, bass_level * 0.84, drum_level * 0.94],
             'bend': [0., lead_bend, 0., 0.],
             'pan': [pad_pan, lead_pan, 0.0, clamp(0.18 * features.shoulder_tilt, -0.30, 0.30)],
             'delay_send': delay_send,
@@ -196,17 +225,32 @@ class Composer:
         if self.tempo_lock:
             self.bpm_synced = False
             self.bpm_sync_source = 'locked'
+            self._peak_bpm_conf = 0.0
             return
-        lo_bpm, hi_bpm = self.bpm_sync_range()
-        if features.tracked and features.body_bpm_confidence >= 0.42:
-            target = clamp(features.body_bpm, lo_bpm, hi_bpm)
-            self.bpm += 0.18 * (target - self.bpm)
+        # Consume peak rhythm confidence observed anywhere inside the 0.5s window so brief
+        # dips never prevent BPM sync, while keeping smooth slew (+/- 2.0 BPM per step).
+        peak_conf = max(self._peak_bpm_conf, features.body_bpm_confidence if features.tracked else 0.0)
+        peak_bpm = self._peak_bpm if self._peak_bpm_conf >= features.body_bpm_confidence else features.body_bpm
+        peak_src = self._peak_bpm_source if self._peak_bpm_conf >= features.body_bpm_confidence else features.body_bpm_source
+        self._peak_bpm_conf = 0.0
+
+        lo_bpm, hi_bpm = p.bpm_min, p.bpm_max
+        max_step = 2.0
+        if features.tracked and peak_conf >= 0.48:
+            target = clamp(peak_bpm, lo_bpm, hi_bpm)
+            delta = clamp(target - self.bpm, -max_step, max_step)
+            self.bpm = clamp(self.bpm + delta, lo_bpm, hi_bpm)
             self.bpm_synced = True
-            self.bpm_sync_source = features.body_bpm_source
-        elif seconds >= self.medium_at:
+            self.bpm_sync_source = peak_src or 'body'
+            self._bpm_sync_until = seconds + 2.0
+        elif features.tracked and seconds < self._bpm_sync_until:
+            # Hold steady locked tempo through brief 1-2s phrase transitions.
+            self.bpm_synced = True
+        else:
             bpm_span = p.bpm_max - p.bpm_min
-            target = p.bpm_min + bpm_span * clamp(0.55 * self.context.energy + 0.25 * self.context.periodicity + 0.20 * self.context.shoulder_bounce)
-            self.bpm += 0.28 * (target - self.bpm)
+            target = p.bpm_min + bpm_span * clamp(0.50 * self.context.energy + 0.30 * self.context.periodicity + 0.20 * self.context.shoulder_bounce)
+            delta = clamp(target - self.bpm, -max_step * 0.5, max_step * 0.5)
+            self.bpm = clamp(self.bpm + delta, lo_bpm, hi_bpm)
             self.bpm_synced = False
             self.bpm_sync_source = 'auto'
 
@@ -223,10 +267,17 @@ class Composer:
     def update(self, features: Features, frame: int, seconds: float, lookahead: int = 2400):
         events = []
         p = self.profile
+        self._last_seconds = seconds
         if self.presets_dirty:
             for limb, preset_id in enumerate(p.presets):
                 events.append(Event(limb, 4, preset_id, 0., 0))
             self.presets_dirty = False
+
+        # Capture peak body BPM confidence on EVERY frame so 0.5s updates never miss a rhythm lock.
+        if features.tracked and features.body_bpm_confidence >= self._peak_bpm_conf:
+            self._peak_bpm_conf = features.body_bpm_confidence
+            self._peak_bpm = features.body_bpm
+            self._peak_bpm_source = features.body_bpm_source
 
         self.window.append(features)
         self.fast_window.append(features)
@@ -235,9 +286,7 @@ class Composer:
         if seconds >= self.medium_at:
             self.context = self._average(self.window, features.tracked)
             self._update_bpm(features, seconds)
-            self.medium_at = seconds + 0.65
-        elif features.body_bpm_confidence >= 0.42 and not self.tempo_lock:
-            self._update_bpm(features, seconds)
+            self.medium_at = seconds + 0.50
 
         if self.next_frame is None:
             self.next_frame = frame + 512
@@ -259,28 +308,28 @@ class Composer:
 
         live_energy = clamp(0.68 * self.fast_context.energy + 0.32 * self.context.energy)
         self.section = self.sections.update(live_energy, features, seconds)
-        self.head_harmony_active = abs(features.head_tilt) > 0.28
-        self.shoulder_groove_active = features.shoulder_bounce > 0.22 or abs(features.shoulder_tilt) > 0.30
+        self.head_harmony_active = abs(features.head_tilt) > 0.30
+        self.shoulder_groove_active = features.shoulder_bounce > 0.55 or abs(features.shoulder_tilt) > 0.45
 
-        # Instant SHOULDER DROP impact (releasing a shoulder shrug -> big Drop hit!).
+        # Instant SHOULDER DROP impact (releasing a shoulder shrug -> big Drop hit with Crash 49!).
         if features.shoulder_drop:
             q_drop = quantize_gesture_frame(frame, self.next_frame, interval)
             sub_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
             events.extend((
-                Event(3, 0, 36, 0.96, q_drop),
-                Event(3, 0, 46, 0.68, q_drop),
-                Event(2, 0, sub_root, 0.92, q_drop),
+                Event(3, 0, 36, 0.94, q_drop),
+                Event(3, 0, 49, 0.78, q_drop),
+                Event(2, 0, sub_root, 0.90, q_drop),
                 Event(2, 1, sub_root, 0., q_drop + int(RATE * 0.65)),
             ))
             drop_chord = voice_lead(self.prev_chord_notes, self.chord_degree, self.current_chord.voicing, p.base_midi, p.scale, left_height=max(0.65, features.left_height))
-            for note, vel, on_f, off_f in strum_chord_schedule(drop_chord, q_drop, p.strum_ms, int(RATE * 1.4), 0.72):
+            for note, vel, on_f, off_f in strum_chord_schedule(drop_chord, q_drop, p.strum_ms, int(RATE * 1.4), 0.74):
                 events.extend((Event(0, 0, note, vel, on_f), Event(0, 1, note, 0., off_f)))
 
-        # Instant HEAD NOD accent (quantized rhythmic hi-hat/rimshot hit!).
-        if features.head_nod and (seconds - self.last_head_nod) >= 0.18:
+        # Instant HEAD NOD accent (quantized rhythmic hi-hat/crash accent with 450ms cooldown).
+        if features.head_nod and (seconds - self.last_head_nod) >= 0.45:
             q_nod = quantize_gesture_frame(frame, self.next_frame, interval)
             nod_note = 46 if self.section in ('CHORUS', 'DROP') else 42
-            events.append(Event(3, 0, nod_note, clamp(0.45 + 0.35 * live_energy, 0.35, 0.85), q_nod))
+            events.append(Event(3, 0, nod_note, clamp(0.50 + 0.30 * live_energy, 0.40, 0.85), q_nod))
             self.last_head_nod = seconds
 
         while self.next_frame <= frame + lookahead:
@@ -318,7 +367,9 @@ class Composer:
                     events.extend((Event(0, 0, note, vel, on_f), Event(0, 1, note, 0., off_f)))
 
             # Layer 1 — Structured A - A' - B - A'' Melody guided by Right Arm height + Head Tilt harmony!
-            melody_notes = PhraseSequencer.notes_at_slot(
+            # When right arm is down and resting, give the melody space to breathe unless in DROP.
+            right_arm_resting = features.right_height < 0.18 and features.right_speed < 0.40 and self.section != 'DROP'
+            melody_notes = [] if right_arm_resting else PhraseSequencer.notes_at_slot(
                 style=p,
                 bar_in_cycle=self.bar_in_cycle,
                 slot=slot,
@@ -328,98 +379,143 @@ class Composer:
                 head_tilt=features.head_tilt,
             )
             for midi, length_steps, vel_scale in melody_notes:
-                vel = clamp((0.36 + 0.42 * max(live_energy, clamp(features.right_speed / 2.2))) * vel_scale, 0.22, 0.95)
+                # Keep autopilot melody balanced (0.22..0.64) so intentional fast arm punches (0.95..1.0)
+                # cut through the mix with undeniable +6 dB visceral punch!
+                vel = clamp((0.26 + 0.34 * max(live_energy, clamp(features.right_speed / 2.5))) * vel_scale, 0.20, 0.64)
                 dur_frames = int(max(RATE * 0.14, interval * length_steps * 0.88))
                 events.extend((
                     Event(1, 0, midi, vel, target + swing_amt),
                     Event(1, 1, midi, 0., target + swing_amt + dur_frames),
                 ))
 
-            # Layer 2 — Authentic Style Bassline (anchored to the 1; shoulder bounce adds expressive octave lift!).
-            if self.section in ('GROOVE', 'CHORUS', 'DROP'):
+            # Layer 2 — Authentic Style Bassline (when legs are visible, legs drive bass groove & density!).
+            legs_drive_bass = (not features.legs_visible) or (features.leg_energy >= 0.14) or (slot == 0)
+            if self.section in ('GROOVE', 'CHORUS', 'DROP') and legs_drive_bass:
                 for b_note in p.bass_pattern:
                     if b_note.step == slot:
                         bass_base = max(28, p.base_midi - 12)
                         oct_lift = 12 if (self.shoulder_groove_active and slot >= 8 and slot % 4 != 0) else 0
                         midi = max(28, min(60, degree_to_midi(self.chord_degree + b_note.degree_offset, bass_base, p.scale) + oct_lift))
-                        vel = clamp(0.45 + 0.40 * live_energy, 0.30, 0.95)
+                        bass_e = features.leg_energy if features.legs_visible else live_energy
+                        vel = clamp(0.40 + 0.44 * bass_e, 0.28, 0.94)
                         dur_frames = int(max(RATE * 0.12, interval * b_note.length_steps * 0.85))
                         events.extend((
                             Event(2, 0, midi, vel, target + swing_amt),
                             Event(2, 1, midi, 0., target + swing_amt + dur_frames),
                         ))
 
-            # Layer 3 — Polyphonic Drum Kit (Preset 12) anchored to bar + Bar-4 fills + Shrug Build-up roll!
+            # Layer 3 — Polyphonic Drum Kit (Preset 12): when legs are visible, YOUR LEGS CONTROL THE BEAT!
             drums = p.drums
-            is_bar4_fill = (self.bar_in_cycle == 3 and slot >= 12 and self.section in ('CHORUS', 'DROP'))
+            legs_want_drums = (not features.legs_visible) or (features.leg_energy >= 0.14)
+            legs_want_full = (not features.legs_visible) or (features.leg_energy >= 0.38)
+            is_bar4_fill = (self.bar_in_cycle == 3 and slot >= 12 and self.section in ('CHORUS', 'DROP') and legs_want_full)
             if self.section == 'BUILDUP':
-                # Shoulder shrug Build-up: rising 8th/16th snare + hat tension roll!
-                roll_stride = 1 if features.shoulder_lift > 0.72 else 2
-                if slot % roll_stride == 0:
-                    roll_vel = clamp(0.32 + 0.55 * features.shoulder_lift, 0.30, 0.92)
+                # Clean musical 8th-note rising snare tension (zero frantic 16th-note popping!).
+                if slot % 2 == 0:
+                    roll_vel = clamp(0.26 + 0.42 * features.shoulder_lift, 0.24, 0.72)
                     events.append(Event(3, 0, 38, roll_vel, target))
-                    events.append(Event(3, 0, 42, roll_vel * 0.65, target))
+                    if slot % 4 == 0:
+                        events.append(Event(3, 0, 42, roll_vel * 0.55, target))
             elif is_bar4_fill:
                 for f_step, f_note in drums.fill_bar4:
                     if f_step == slot:
-                        events.append(Event(3, 0, f_note, clamp(0.50 + 0.38 * live_energy, 0.35, 0.95), target + swing_amt))
-            elif self.section in ('GROOVE', 'CHORUS', 'DROP'):
-                kicks = drums.kick_full if self.section in ('CHORUS', 'DROP') else drums.kick_groove
-                hats = drums.hat_full if self.section in ('CHORUS', 'DROP') else drums.hat_groove
+                        events.append(Event(3, 0, f_note, clamp(0.48 + 0.36 * live_energy, 0.35, 0.92), target + swing_amt))
+            elif self.section in ('GROOVE', 'CHORUS', 'DROP') and legs_want_drums:
+                use_full = self.section in ('CHORUS', 'DROP') and legs_want_full
+                drum_e = features.leg_energy if features.legs_visible else live_energy
+                kicks = drums.kick_full if use_full else drums.kick_groove
+                hats = drums.hat_full if use_full else drums.hat_groove
                 if slot in kicks:
-                    events.append(Event(3, 0, 36, clamp(0.48 + 0.42 * live_energy, 0.35, 0.98), target))
-                if self.section in ('CHORUS', 'DROP') and slot in drums.snare:
-                    events.append(Event(3, 0, 38, clamp(0.40 + 0.42 * live_energy, 0.32, 0.94), target + swing_amt))
+                    events.append(Event(3, 0, 36, clamp(0.50 + 0.42 * drum_e, 0.36, 0.96), target))
+                if use_full and slot in drums.snare:
+                    events.append(Event(3, 0, 38, clamp(0.38 + 0.40 * drum_e, 0.30, 0.88), target + swing_amt))
                 if slot in hats:
-                    hat_note = 46 if (self.section in ('CHORUS', 'DROP') and slot in drums.open_hat and features.expansion > 0.55) else 42
-                    events.append(Event(3, 0, hat_note, clamp(0.22 + 0.28 * live_energy, 0.16, 0.72), target + swing_amt))
-                # Alternating shoulder groove injects crisp musical ghost snares!
-                if self.shoulder_groove_active and slot in drums.ghost_snare:
-                    events.append(Event(3, 0, 38, clamp(0.24 + 0.22 * features.shoulder_bounce, 0.20, 0.52), target + swing_amt))
+                    hat_note = 46 if (use_full and slot in drums.open_hat and features.expansion > 0.55) else 42
+                    events.append(Event(3, 0, hat_note, clamp(0.20 + 0.26 * drum_e, 0.16, 0.65), target + swing_amt))
+                # Alternating shoulder groove injects subtle musical ghost snares when dancing actively!
+                if self.shoulder_groove_active and use_full and slot in drums.ghost_snare:
+                    events.append(Event(3, 0, 38, clamp(0.22 + 0.18 * features.shoulder_bounce, 0.18, 0.44), target + swing_amt))
 
             self.tick += 1
             self.next_frame += interval
 
-        # --- Immediate Beat-Quantized Reactions to Fast Directional Arm Strikes ---
-        if (features.right_strike != 0 or (features.acceleration > 28 and features.energy > 0.35)) and seconds - self.last_accent > 0.20:
-            q_frame = quantize_gesture_frame(frame, self.next_frame, interval)
-            strength = max(features.right_strike_strength, 0.55)
+        # --- Immediate Clean Musical Punches (8ms safe offset = zero late_commands, zero drum popcorn!) ---
+        if (features.right_strike != 0 or (features.acceleration > 52 and features.energy > 0.50)) and seconds - self.last_accent > 0.42:
+            hit_frame = frame + 384  # ~8 ms: imperceptible instant feel AND zero late_commands!
+            strength = max(features.right_strike_strength, 0.68)
+            self.strike_punch = max(self.strike_punch, strength)
+            self.strike_punch_at = seconds
             base_deg = int(round(features.right_height * 12.0))
             if features.right_strike >= 0:
-                n1 = max(55, min(96, degree_to_midi(self.chord_degree + max(4, base_deg), p.base_midi, p.scale)))
+                n1 = max(55, min(94, degree_to_midi(self.chord_degree + max(4, base_deg), p.base_midi, p.scale)))
                 n2 = max(58, min(96, degree_to_midi(self.chord_degree + max(4, base_deg) + 2, p.base_midi, p.scale)))
                 step = int(interval * 0.5)
                 events.extend((
-                    Event(1, 0, n1, clamp(0.55 + 0.35 * strength), q_frame),
-                    Event(1, 1, n1, 0., q_frame + int(RATE * 0.25)),
-                    Event(1, 0, n2, clamp(0.62 + 0.32 * strength), q_frame + step),
-                    Event(1, 1, n2, 0., q_frame + step + int(RATE * 0.35)),
+                    Event(1, 0, n1, clamp(0.86 + 0.14 * strength), hit_frame),
+                    Event(1, 1, n1, 0., hit_frame + int(RATE * 0.30)),
+                    Event(1, 0, n2, clamp(0.88 + 0.12 * strength), hit_frame + step),
+                    Event(1, 1, n2, 0., hit_frame + step + int(RATE * 0.40)),
                 ))
             else:
                 n_hit = max(48, min(84, degree_to_midi(self.chord_degree + max(0, base_deg), p.base_midi, p.scale)))
+                n_oct = min(96, n_hit + 12)
                 events.extend((
-                    Event(1, 0, n_hit, clamp(0.65 + 0.30 * strength), q_frame),
-                    Event(1, 1, n_hit, 0., q_frame + int(RATE * 0.30)),
-                    Event(3, 0, 38, clamp(0.45 + 0.40 * strength), q_frame),
+                    Event(1, 0, n_hit, clamp(0.88 + 0.12 * strength), hit_frame),
+                    Event(1, 1, n_hit, 0., hit_frame + int(RATE * 0.34)),
+                    Event(1, 0, n_oct, clamp(0.76 + 0.16 * strength), hit_frame),
+                    Event(1, 1, n_oct, 0., hit_frame + int(RATE * 0.28)),
                 ))
             self.last_accent = seconds
 
-        if features.left_strike != 0 and seconds - self.last_left_strike > 0.22:
-            q_frame = quantize_gesture_frame(frame, self.next_frame, interval)
-            strength = max(features.left_strike_strength, 0.55)
+        if features.left_strike != 0 and seconds - self.last_left_strike > 0.45:
+            hit_frame = frame + 384
+            strength = max(features.left_strike_strength, 0.68)
+            self.strike_punch = max(self.strike_punch, strength)
+            self.strike_punch_at = seconds
             if features.left_strike > 0:
                 top_note = max(60, min(92, degree_to_midi(self.chord_degree + 8, p.base_midi, p.scale)))
+                mid_note = max(53, min(84, degree_to_midi(self.chord_degree + 4, p.base_midi, p.scale)))
                 events.extend((
-                    Event(0, 0, top_note, clamp(0.50 + 0.35 * strength), q_frame),
-                    Event(0, 1, top_note, 0., q_frame + int(RATE * 0.90)),
+                    Event(0, 0, mid_note, clamp(0.74 + 0.20 * strength), hit_frame),
+                    Event(0, 1, mid_note, 0., hit_frame + int(RATE * 0.80)),
+                    Event(0, 0, top_note, clamp(0.80 + 0.18 * strength), hit_frame),
+                    Event(0, 1, top_note, 0., hit_frame + int(RATE * 0.95)),
                 ))
             else:
                 sub_note = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                chord_hit = max(48, min(72, degree_to_midi(self.chord_degree, p.base_midi, p.scale)))
                 events.extend((
-                    Event(3, 0, 36, clamp(0.60 + 0.35 * strength), q_frame),
-                    Event(2, 0, sub_note, clamp(0.60 + 0.32 * strength), q_frame),
-                    Event(2, 1, sub_note, 0., q_frame + int(RATE * 0.35)),
+                    Event(3, 0, 36, clamp(0.84 + 0.16 * strength), hit_frame),
+                    Event(2, 0, sub_note, clamp(0.82 + 0.16 * strength), hit_frame),
+                    Event(2, 1, sub_note, 0., hit_frame + int(RATE * 0.38)),
+                    Event(0, 0, chord_hit, clamp(0.70 + 0.20 * strength), hit_frame),
+                    Event(0, 1, chord_hit, 0., hit_frame + int(RATE * 0.45)),
                 ))
             self.last_left_strike = seconds
+
+        # --- Explicit Full-Body Leg Stomps (fires ONLY on real knee/foot lift + stomp, never standing jitter!) ---
+        if features.right_leg_strike and (seconds - self.last_leg_strike[1]) >= 0.38:
+            hit_frame = frame + 384
+            self.strike_punch = max(self.strike_punch, 0.72)
+            self.strike_punch_at = seconds
+            sub_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+            events.extend((
+                Event(3, 0, 36, 0.96, hit_frame),
+                Event(2, 0, sub_root, 0.88, hit_frame),
+                Event(2, 1, sub_root, 0., hit_frame + int(RATE * 0.32)),
+            ))
+            self.last_leg_strike[1] = seconds
+
+        if features.left_leg_strike and (seconds - self.last_leg_strike[0]) >= 0.38:
+            hit_frame = frame + 384
+            self.strike_punch = max(self.strike_punch, 0.62)
+            self.strike_punch_at = seconds
+            bass_fifth = max(31, min(57, degree_to_midi(self.chord_degree + 4, max(28, p.base_midi - 12), p.scale)))
+            events.extend((
+                Event(3, 0, 38, 0.86, hit_frame),
+                Event(2, 0, bass_fifth, 0.80, hit_frame),
+                Event(2, 1, bass_fifth, 0., hit_frame + int(RATE * 0.28)),
+            ))
+            self.last_leg_strike[0] = seconds
 
         return events

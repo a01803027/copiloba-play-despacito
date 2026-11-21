@@ -39,13 +39,14 @@ class AudioEngine {
  SharedMemory& shared_;const Wavetables& tables_;std::array<SampleView,4> samples_;StemBus& stems_;
  std::array<VoicePool,4> voices_{};
  std::array<std::array<CytomicSvf,2>,4> filters_{};
- std::array<OnePoleSmoother,4> cutoff_{{OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000),OnePoleSmoother(8000)}};
+ std::array<std::array<OnePoleHpf,2>,2> hpf_{{{OnePoleHpf(185.f),OnePoleHpf(185.f)},{OnePoleHpf(220.f),OnePoleHpf(220.f)}}};
+ std::array<OnePoleSmoother,4> cutoff_{{OnePoleSmoother(8000,18),OnePoleSmoother(8000,18),OnePoleSmoother(8000,18),OnePoleSmoother(8000,18)}};
  std::array<OnePoleSmoother,4> send_{},bend_{};
- std::array<OnePoleSmoother,4> gain_{{OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1),OnePoleSmoother(1)}};
- std::array<OnePoleSmoother,4> pan_{{OnePoleSmoother(0),OnePoleSmoother(0),OnePoleSmoother(0),OnePoleSmoother(0)}};
+ std::array<OnePoleSmoother,4> gain_{{OnePoleSmoother(1,16),OnePoleSmoother(1,16),OnePoleSmoother(1,16),OnePoleSmoother(1,16)}};
+ std::array<OnePoleSmoother,4> pan_{{OnePoleSmoother(0,16),OnePoleSmoother(0,16),OnePoleSmoother(0,16),OnePoleSmoother(0,16)}};
  std::array<OnePoleSmoother,4> volume_{{OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f),OnePoleSmoother(.6f)}};
  OnePoleSmoother bpm_{120,50},energy_{.5f,20},delay_send_{0,20},resonance_{.70710678f,20},sidechain_depth_{0,20};
- float sidechain_env_=0.f;
+ float sidechain_peak_=0.f,sidechain_env_=0.f;
  Reverb reverb_;StereoDelay delay_;PendingCommands pending_;
  std::array<std::array<PatternSlot,32>,4> patterns_{};
  std::array<bool,4> muted_{},locked_{},stem_muted_{};
@@ -61,13 +62,13 @@ class AudioEngine {
   if(p==12){
    unsigned idx=(note==36)?0u:(note==38)?1u:(note==42 || note==46)?2u:3u;
    asset=samples_[idx];
-   if(idx==0)sidechain_env_=1.f;
+   if(idx==0)sidechain_peak_=1.f;
   }else if(p>=2 && p<6){
    asset=samples_[p-2];
    if(performance_ && !asset.samples)p=limb>=2?6+(limb==2):p%2;
-   if(p==2 || p==6)sidechain_env_=1.f;
+   if(p==2 || p==6)sidechain_peak_=1.f;
   }else if(p==6){
-   sidechain_env_=1.f;
+   sidechain_peak_=1.f;
   }
   voices_[limb].note_on(note,velocity,p,tables_,asset);
  }
@@ -89,7 +90,7 @@ class AudioEngine {
   case EventType::NOTE_OFF:voices_[l].note_off(c.note_or_param);break;
   case EventType::MUTE_TOGGLE:muted_[l]=!muted_[l];if(muted_[l])voices_[l].silence();break;
   case EventType::LOOP_LOCK:locked_[l]=c.value>=.5f;break;
-  case EventType::PRESET_CHANGE:if(c.note_or_param<13)preset_[l]=c.note_or_param;else ++invalid_;break;
+  case EventType::PRESET_CHANGE:if(c.note_or_param<15)preset_[l]=c.note_or_param;else ++invalid_;break;
   case EventType::STEM_MUTE:break;
   }
  }
@@ -142,13 +143,17 @@ public:
    }}
    Stereo master{},reverb_in{},delay_in{};
    float cur_delay=delay_send_.next(d_send),cur_res=resonance_.next(res),cur_sc=sidechain_depth_.next(sc);
-   sidechain_env_*=0.99988f; // ~170 ms smooth release
+   // Click-free smooth sidechain pump: ~2.6ms smooth attack into ~150ms release (zero 1-sample step pops!).
+   sidechain_peak_*=0.99986f;
+   sidechain_env_+=0.008f*(sidechain_peak_-sidechain_env_);
    for(unsigned l=0;l<4;++l){
     float cutoff=cutoff_[l].next(fc[l]),send=send_[l].next(rs[l]),bend=tables_.bend(bend_[l].next(pb[l]));
     auto bus=voices_[l].next(tables_,bend);
     float bus_res=(l<2)?cur_res:.70710678f;
     filters_[l][0].coefficients(cutoff,bus_res);filters_[l][1].coefficients(cutoff,bus_res);
     bus.l=filters_[l][0].next(bus.l).low;bus.r=filters_[l][1].next(bus.r).low;
+    // Carve sub-bass mud out of Chords (limb 0) and Melody (limb 1) when using studio presets (8..14).
+    if(l<2 && preset_[l]>=8){bus.l=hpf_[l][0].next(bus.l);bus.r=hpf_[l][1].next(bus.r);}
     float limb_gain=gain_[l].next(lg[l]);
     if(l==0 && cur_sc>1e-4f)limb_gain*=(1.f-cur_sc*sidechain_env_);
     bus=apply_pan({bus.l*limb_gain,bus.r*limb_gain},pan_[l].next(pn[l]));
@@ -157,12 +162,12 @@ public:
     if(l<2 && cur_delay>1e-4f){delay_in.l+=bus.l*cur_delay;delay_in.r+=bus.r*cur_delay;}
    }
    auto del=delay_.next(delay_in,current_bpm);
-   master.l+=del.l*.32f;master.r+=del.r*.32f;
-   reverb_in.l+=del.l*.18f;reverb_in.r+=del.r*.18f;
-   auto wet=reverb_.next(reverb_in);master.l+=wet.l*.34f;master.r+=wet.r*.34f;
+   master.l+=del.l*.36f;master.r+=del.r*.36f;
+   reverb_in.l+=del.l*.20f;reverb_in.r+=del.r*.20f;
+   auto wet=reverb_.next(reverb_in);master.l+=wet.l*.38f;master.r+=wet.r*.38f;
    StemFrame stems{};if(stems_enabled && !stems_.frames.try_pop(stems))++starved_;
    for(unsigned l=0;l<4;++l){float vol=volume_[l].next(stem_muted_[l]?0:sv[l]);master.l+=stems.stem[l].l*vol;master.r+=stems.stem[l].r*vol;}
-   float gain=.4f+.2f*current_energy;output[2*n]=master.l*gain;output[2*n+1]=master.r*gain;
+   float gain=.62f+.28f*current_energy;output[2*n]=master.l*gain;output[2*n+1]=master.r*gain;
    if(!performance_)phase_+=current_bpm/(sample_rate*15.0);
   }
   limit_stereo(output,frame_count);

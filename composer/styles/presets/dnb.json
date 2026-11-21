@@ -1,11 +1,11 @@
 {
   "key": "dnb",
   "label": "Liquid Drum & Bass",
-  "order": 8,
-  "base_midi": 43,
+  "order": 6,
+  "base_midi": 55,
   "scale": [0, 2, 3, 5, 7, 8, 10],
   "bpm_default": 168,
-  "bpm_min": 156,
+  "bpm_min": 160,
   "bpm_max": 176,
   "swing": 0.03,
   "presets": [8, 9, 11, 12],
@@ -33,14 +33,14 @@
     "hat_full": [0, 2, 3, 4, 6, 8, 10, 11, 12, 14],
     "open_hat": [6, 14],
     "ghost_snare": [7, 9, 15],
-    "fill_bar4": [[10, 36], [12, 38], [14, 38], [15, 38]]
+    "fill_bar4": [[10, 36], [12, 38], [14, 38], [15, 49]]
   },
   "fx": {
-    "cutoff_pad": [550, 7600],
-    "cutoff_lead": [1000, 10500],
-    "reverb_pad": [0.46, 0.86],
-    "reverb_lead": [0.34, 0.72],
-    "delay_send": 0.42,
+    "cutoff_pad": [1100, 10500],
+    "cutoff_lead": [2000, 14000],
+    "reverb_pad": [0.46, 0.85],
+    "reverb_lead": [0.35, 0.72],
+    "delay_send": 0.44,
     "resonance": 1.00,
     "sidechain": 0.45
   }
