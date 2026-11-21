@@ -1,0 +1,47 @@
+{
+  "key": "synthwave",
+  "label": "Retro Synthwave",
+  "order": 5,
+  "base_midi": 45,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 112,
+  "bpm_min": 100,
+  "bpm_max": 122,
+  "swing": 0.02,
+  "presets": [8, 10, 11, 12],
+  "strum_ms": 12,
+  "progression": [
+    {"degree": 0, "name": "Am9", "voicing": [0, 2, 4, 8]},
+    {"degree": 5, "name": "Fmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 2, "name": "Cadd9", "voicing": [0, 2, 4, 8]},
+    {"degree": 6, "name": "G6", "voicing": [0, 2, 4, 5]}
+  ],
+  "bright_chord": {"degree": 2, "name": "Cmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Em7", "voicing": [0, 2, 4, 6]},
+  "comping_steps": [0, 8],
+  "chord_duration_s": 2.2,
+  "motifs": {
+    "a": [[0, 4, 2], [2, 2, 2], [4, 0, 2], [6, 2, 2], [8, 4, 3], [12, 7, 3]],
+    "b": [[0, 7, 2], [2, 6, 2], [4, 4, 2], [6, 2, 2], [8, 4, 4], [12, 2, 3]]
+  },
+  "bass_pattern": [[0, 0, 2], [2, 0, 2], [4, 0, 2], [6, 0, 2], [8, 0, 2], [10, 0, 2], [12, 0, 2], [14, 4, 2]],
+  "drums": {
+    "kick_groove": [0, 8],
+    "kick_full": [0, 4, 8, 12],
+    "snare": [4, 12],
+    "hat_groove": [2, 6, 10, 14],
+    "hat_full": [0, 2, 4, 6, 8, 10, 12, 14],
+    "open_hat": [14],
+    "ghost_snare": [10, 15],
+    "fill_bar4": [[12, 38], [13, 38], [14, 38], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [600, 7500],
+    "cutoff_lead": [1100, 12000],
+    "reverb_pad": [0.42, 0.80],
+    "reverb_lead": [0.35, 0.72],
+    "delay_send": 0.46,
+    "resonance": 1.15,
+    "sidechain": 0.45
+  }
+}

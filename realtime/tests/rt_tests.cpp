@@ -123,6 +123,25 @@ int main(){
   CHECK(peak_l>1e-3f && peak_r>1e-3f);
   CHECK(local->telemetry.invalid_commands.load()==0);
  }
+ // Verify Preset 12 (Polyphonic Drum Kit: kick+snare+closed/open hat on one bus) + zero allocations.
+ {auto local=std::make_unique<SharedMemory>();auto bus=std::make_unique<StemBus>();
+  std::array<float,2048> hit{};hit.fill(.4f);
+  std::array<SampleView,4> kit{{{hit.data(),1024,2},{hit.data(),1024,2},{hit.data(),1024,2},{hit.data(),1024,2}}};
+  AudioEngine e(*local,*tables,kit,*bus);
+  local->controls.sidechain_depth.store(.6f);
+  CHECK(local->commands.try_push({LimbID::L_ARM,EventType::PRESET_CHANGE,8,0,0,0}));
+  CHECK(local->commands.try_push({LimbID::R_LEG,EventType::PRESET_CHANGE,12,0,0,0}));
+  CHECK(local->commands.try_push({LimbID::L_ARM,EventType::NOTE_ON,48,0,.7f,0}));
+  for(uint8_t drum_note:{uint8_t(36),uint8_t(38),uint8_t(42),uint8_t(46)})
+   CHECK(local->commands.try_push({LimbID::R_LEG,EventType::NOTE_ON,drum_note,0,.85f,0}));
+  float peak=0;
+  for(unsigned i=0;i<20;++i){
+   no_allocations=true;e.processBlock(output.data(),128);no_allocations=false;
+   for(float value:output){CHECK(finite(value)&&std::abs(value)<=1.f);peak=std::max(peak,std::abs(value));}
+  }
+  CHECK(peak>1e-2f);
+  CHECK(local->telemetry.invalid_commands.load()==0);
+ }
 #ifdef __linux__
  // Kernel-enforced zero-system-call test, including libc/vDSO-fallback paths.
  // All allocation, libc warmup and fork happen BEFORE installing the filter.

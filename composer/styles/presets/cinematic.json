@@ -1,0 +1,47 @@
+{
+  "key": "cinematic",
+  "label": "Cinematic Pulse",
+  "order": 4,
+  "base_midi": 50,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 100,
+  "bpm_min": 88,
+  "bpm_max": 116,
+  "swing": 0.03,
+  "presets": [8, 10, 11, 12],
+  "strum_ms": 20,
+  "progression": [
+    {"degree": 0, "name": "Dm9", "voicing": [0, 2, 4, 8]},
+    {"degree": 5, "name": "Bbmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 2, "name": "Fmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "Csus4", "voicing": [0, 3, 4, 6]}
+  ],
+  "bright_chord": {"degree": 2, "name": "Fmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Am9", "voicing": [0, 2, 4, 8]},
+  "comping_steps": [0, 8],
+  "chord_duration_s": 2.8,
+  "motifs": {
+    "a": [[0, 0, 2], [2, 4, 2], [4, 2, 2], [6, 4, 2], [8, 7, 2], [10, 4, 2], [12, 2, 2], [14, 4, 2]],
+    "b": [[0, 4, 2], [2, 7, 2], [4, 6, 2], [6, 4, 2], [8, 9, 2], [10, 7, 2], [12, 4, 4]]
+  },
+  "bass_pattern": [[0, 0, 2], [2, 0, 2], [4, 0, 2], [6, 0, 2], [8, 0, 2], [10, 0, 2], [12, 4, 2], [14, 0, 2]],
+  "drums": {
+    "kick_groove": [0, 6, 12],
+    "kick_full": [0, 3, 6, 10, 12],
+    "snare": [8],
+    "hat_groove": [0, 4, 8, 12],
+    "hat_full": [0, 2, 4, 6, 8, 10, 12, 14],
+    "open_hat": [8],
+    "ghost_snare": [4, 14],
+    "fill_bar4": [[12, 36], [13, 38], [14, 38], [15, 36]]
+  },
+  "fx": {
+    "cutoff_pad": [480, 7600],
+    "cutoff_lead": [1000, 11500],
+    "reverb_pad": [0.52, 0.90],
+    "reverb_lead": [0.36, 0.80],
+    "delay_send": 0.48,
+    "resonance": 1.15,
+    "sidechain": 0.36
+  }
+}

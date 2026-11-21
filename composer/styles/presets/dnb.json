@@ -1,0 +1,47 @@
+{
+  "key": "dnb",
+  "label": "Liquid Drum & Bass",
+  "order": 8,
+  "base_midi": 43,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 168,
+  "bpm_min": 156,
+  "bpm_max": 176,
+  "swing": 0.03,
+  "presets": [8, 9, 11, 12],
+  "strum_ms": 20,
+  "progression": [
+    {"degree": 0, "name": "Gm9", "voicing": [0, 2, 4, 8]},
+    {"degree": 5, "name": "Ebmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 2, "name": "Bbmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "Fadd9", "voicing": [0, 2, 4, 8]}
+  ],
+  "bright_chord": {"degree": 2, "name": "Bbmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Dm9", "voicing": [0, 2, 4, 8]},
+  "comping_steps": [0],
+  "chord_duration_s": 2.4,
+  "motifs": {
+    "a": [[0, 4, 3], [4, 2, 3], [8, 0, 4], [12, 2, 4]],
+    "b": [[0, 7, 3], [4, 6, 3], [8, 4, 4], [12, 2, 4]]
+  },
+  "bass_pattern": [[0, 0, 6], [10, 0, 4], [14, 4, 2]],
+  "drums": {
+    "kick_groove": [0, 10],
+    "kick_full": [0, 10],
+    "snare": [4, 12],
+    "hat_groove": [0, 2, 4, 6, 8, 10, 12, 14],
+    "hat_full": [0, 2, 3, 4, 6, 8, 10, 11, 12, 14],
+    "open_hat": [6, 14],
+    "ghost_snare": [7, 9, 15],
+    "fill_bar4": [[10, 36], [12, 38], [14, 38], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [550, 7600],
+    "cutoff_lead": [1000, 10500],
+    "reverb_pad": [0.46, 0.86],
+    "reverb_lead": [0.34, 0.72],
+    "delay_send": 0.42,
+    "resonance": 1.00,
+    "sidechain": 0.45
+  }
+}

@@ -57,9 +57,18 @@ class AudioEngine {
  uint64_t current_grid_frame_=0;
  uint64_t next_grid_frame()const noexcept{return uint64_t(next_grid_+.5);}
  void trigger(unsigned limb,uint8_t note,float velocity)noexcept{
-  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset=p>=2&&p<6?samples_[p-2]:SampleView{};
-  if(performance_ && p>=2 && p<6 && !asset.samples)p=limb>=2?6+(limb==2):p%2;
-  if(p==2 || p==6)sidechain_env_=1.f;
+  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset{};
+  if(p==12){
+   unsigned idx=(note==36)?0u:(note==38)?1u:(note==42 || note==46)?2u:3u;
+   asset=samples_[idx];
+   if(idx==0)sidechain_env_=1.f;
+  }else if(p>=2 && p<6){
+   asset=samples_[p-2];
+   if(performance_ && !asset.samples)p=limb>=2?6+(limb==2):p%2;
+   if(p==2 || p==6)sidechain_env_=1.f;
+  }else if(p==6){
+   sidechain_env_=1.f;
+  }
   voices_[limb].note_on(note,velocity,p,tables_,asset);
  }
  void execute(const AudioCommand& c)noexcept{
@@ -80,7 +89,7 @@ class AudioEngine {
   case EventType::NOTE_OFF:voices_[l].note_off(c.note_or_param);break;
   case EventType::MUTE_TOGGLE:muted_[l]=!muted_[l];if(muted_[l])voices_[l].silence();break;
   case EventType::LOOP_LOCK:locked_[l]=c.value>=.5f;break;
-  case EventType::PRESET_CHANGE:if(c.note_or_param<12)preset_[l]=c.note_or_param;else ++invalid_;break;
+  case EventType::PRESET_CHANGE:if(c.note_or_param<13)preset_[l]=c.note_or_param;else ++invalid_;break;
   case EventType::STEM_MUTE:break;
   }
  }

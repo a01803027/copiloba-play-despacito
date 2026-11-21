@@ -1,0 +1,47 @@
+{
+  "key": "house",
+  "label": "Deep Melodic House",
+  "order": 2,
+  "base_midi": 41,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 122,
+  "bpm_min": 114,
+  "bpm_max": 130,
+  "swing": 0.05,
+  "presets": [8, 10, 11, 12],
+  "strum_ms": 14,
+  "progression": [
+    {"degree": 0, "name": "Fm9", "voicing": [0, 2, 4, 6]},
+    {"degree": 5, "name": "Dbmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "Eb6", "voicing": [0, 2, 4, 5]},
+    {"degree": 4, "name": "Cm7", "voicing": [0, 2, 4, 6]}
+  ],
+  "bright_chord": {"degree": 5, "name": "Dbmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Cm9", "voicing": [0, 2, 4, 8]},
+  "comping_steps": [0, 6, 12],
+  "chord_duration_s": 1.6,
+  "motifs": {
+    "a": [[0, 0, 2], [3, 2, 2], [6, 4, 2], [10, 2, 2], [12, 4, 3]],
+    "b": [[0, 4, 2], [2, 6, 2], [6, 7, 2], [8, 4, 2], [12, 2, 3]]
+  },
+  "bass_pattern": [[0, 0, 2], [3, 0, 2], [6, 4, 2], [10, 0, 2], [14, 2, 2]],
+  "drums": {
+    "kick_groove": [0, 4, 8, 12],
+    "kick_full": [0, 4, 8, 12],
+    "snare": [4, 12],
+    "hat_groove": [2, 6, 10, 14],
+    "hat_full": [2, 6, 7, 10, 14, 15],
+    "open_hat": [2, 10],
+    "ghost_snare": [7, 15],
+    "fill_bar4": [[12, 38], [13, 38], [14, 36], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [420, 6200],
+    "cutoff_lead": [850, 11000],
+    "reverb_pad": [0.28, 0.65],
+    "reverb_lead": [0.24, 0.56],
+    "delay_send": 0.40,
+    "resonance": 1.25,
+    "sidechain": 0.60
+  }
+}

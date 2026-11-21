@@ -13,3 +13,5 @@ djvision/
 artifacts/
 
 /docs/TEST_RESULTS.json
+
+*.mp4

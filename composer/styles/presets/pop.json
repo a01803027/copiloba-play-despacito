@@ -1,0 +1,47 @@
+{
+  "key": "pop",
+  "label": "Modern Electro-Pop",
+  "order": 12,
+  "base_midi": 48,
+  "scale": [0, 2, 4, 5, 7, 9, 11],
+  "bpm_default": 118,
+  "bpm_min": 106,
+  "bpm_max": 128,
+  "swing": 0.04,
+  "presets": [8, 10, 11, 12],
+  "strum_ms": 14,
+  "progression": [
+    {"degree": 0, "name": "Cadd9", "voicing": [0, 2, 4, 8]},
+    {"degree": 4, "name": "G6", "voicing": [0, 2, 4, 5]},
+    {"degree": 5, "name": "Am7", "voicing": [0, 2, 4, 6]},
+    {"degree": 3, "name": "Fmaj7", "voicing": [0, 2, 4, 6]}
+  ],
+  "bright_chord": {"degree": 3, "name": "Fmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Gsus4", "voicing": [0, 3, 4, 6]},
+  "comping_steps": [0, 6, 12],
+  "chord_duration_s": 1.2,
+  "motifs": {
+    "a": [[0, 4, 2], [2, 4, 2], [4, 2, 2], [6, 0, 2], [8, 2, 3], [12, 4, 3]],
+    "b": [[0, 7, 2], [2, 6, 2], [4, 4, 2], [6, 2, 2], [8, 4, 3], [12, 2, 3]]
+  },
+  "bass_pattern": [[0, 0, 3], [4, 0, 2], [8, 0, 3], [12, 4, 2], [14, 0, 2]],
+  "drums": {
+    "kick_groove": [0, 8],
+    "kick_full": [0, 4, 8, 12],
+    "snare": [4, 12],
+    "hat_groove": [2, 6, 10, 14],
+    "hat_full": [0, 2, 4, 6, 8, 10, 12, 14],
+    "open_hat": [14],
+    "ghost_snare": [7, 15],
+    "fill_bar4": [[12, 38], [13, 38], [14, 36], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [650, 7600],
+    "cutoff_lead": [1100, 12000],
+    "reverb_pad": [0.30, 0.66],
+    "reverb_lead": [0.26, 0.58],
+    "delay_send": 0.36,
+    "resonance": 1.05,
+    "sidechain": 0.50
+  }
+}

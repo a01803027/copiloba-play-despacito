@@ -1,0 +1,47 @@
+{
+  "key": "latin",
+  "label": "Melodic Latin / Reggaeton",
+  "order": 6,
+  "base_midi": 47,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 96,
+  "bpm_min": 88,
+  "bpm_max": 106,
+  "swing": 0.04,
+  "presets": [9, 10, 11, 12],
+  "strum_ms": 16,
+  "progression": [
+    {"degree": 0, "name": "Bm7", "voicing": [0, 2, 4, 6]},
+    {"degree": 5, "name": "Gmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 2, "name": "Dmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "Aadd9", "voicing": [0, 2, 4, 8]}
+  ],
+  "bright_chord": {"degree": 2, "name": "Dmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "F#m7", "voicing": [0, 2, 4, 6]},
+  "comping_steps": [0, 3, 6, 11],
+  "chord_duration_s": 0.85,
+  "motifs": {
+    "a": [[0, 4, 2], [3, 2, 2], [6, 0, 2], [8, 2, 2], [11, 4, 3]],
+    "b": [[0, 7, 2], [3, 4, 2], [6, 2, 2], [10, 4, 2], [14, 2, 2]]
+  },
+  "bass_pattern": [[0, 0, 3], [6, 0, 2], [8, 0, 3], [14, 4, 2]],
+  "drums": {
+    "kick_groove": [0, 4, 8, 12],
+    "kick_full": [0, 4, 8, 12],
+    "snare": [3, 6, 11, 14],
+    "hat_groove": [2, 6, 10, 14],
+    "hat_full": [0, 2, 4, 6, 8, 10, 12, 14],
+    "open_hat": [6, 14],
+    "ghost_snare": [9, 15],
+    "fill_bar4": [[11, 38], [12, 36], [14, 38], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [700, 6400],
+    "cutoff_lead": [1100, 10500],
+    "reverb_pad": [0.22, 0.52],
+    "reverb_lead": [0.24, 0.54],
+    "delay_send": 0.34,
+    "resonance": 1.05,
+    "sidechain": 0.42
+  }
+}

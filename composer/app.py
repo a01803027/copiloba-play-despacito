@@ -11,7 +11,7 @@ import threading
 import time
 from .brain import Composer
 from .features import FeatureExtractor, mock_features
-from .genres import GENRE_ORDER
+from .styles import STYLE_ORDER
 from .ipc import Bridge
 from .cameras import resolve_camera
 
@@ -26,12 +26,40 @@ def default_build_dir():
     return fallback if fallback.is_dir() else preferred
 
 
-def draw_hud(cv2, image, features, composer):
-    """Draw a clean, translucent musical HUD onto the display frame."""
+def handle_window_key(key, composer):
+    """Handle live keyboard shortcuts for styles, BPM lock, and exit. Returns True to quit."""
+    if key == ord('q'):
+        return True
+    direct_keys = (
+        ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'),
+        ord('7'), ord('8'), ord('9'), ord('0'), ord('-'), ord('='),
+    )
+    if key in direct_keys:
+        idx = direct_keys.index(key)
+        if idx < len(STYLE_ORDER):
+            composer.set_genre(STYLE_ORDER[idx])
+            print(f'Estilo [{idx + 1}/{len(STYLE_ORDER)}]: {composer.preset} ({composer.bpm:.0f} BPM)', flush=True)
+    elif key in (ord('n'), ord('N'), ord(']')):
+        composer.cycle_genre(1)
+        idx = STYLE_ORDER.index(composer.genre_key) + 1 if composer.genre_key in STYLE_ORDER else 1
+        print(f'Estilo [{idx}/{len(STYLE_ORDER)}]: {composer.preset} ({composer.bpm:.0f} BPM)', flush=True)
+    elif key in (ord('p'), ord('P'), ord('[')):
+        composer.cycle_genre(-1)
+        idx = STYLE_ORDER.index(composer.genre_key) + 1 if composer.genre_key in STYLE_ORDER else 1
+        print(f'Estilo [{idx}/{len(STYLE_ORDER)}]: {composer.preset} ({composer.bpm:.0f} BPM)', flush=True)
+    elif key in (ord('t'), ord('T')):
+        locked = composer.toggle_tempo_lock()
+        print(f'BPM {"bloqueado" if locked else "sincronizado con el cuerpo"} ({composer.bpm:.0f} BPM)', flush=True)
+    return False
+
+
+def draw_hud(cv2, image, features, composer, flash_state=None):
+    """Draw a clean, translucent full-body musical HUD onto the display frame."""
     h, w = image.shape[:2]
     overlay = image.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 92), (18, 20, 26), -1)
-    cv2.addWeighted(overlay, 0.72, image, 0.28, 0, image)
+    cv2.rectangle(overlay, (0, 0), (w, 134), (16, 18, 24), -1)
+    cv2.rectangle(overlay, (0, h - 30), (w, h), (16, 18, 24), -1)
+    cv2.addWeighted(overlay, 0.76, image, 0.24, 0, image)
 
     if not features.tracked:
         status_text, status_color = 'BUSCANDO POSE', (70, 90, 240)
@@ -40,21 +68,30 @@ def draw_hud(cv2, image, features, composer):
     else:
         status_text, status_color = 'TRACKING', (90, 230, 120)
 
-    cv2.circle(image, (22, 24), 7, status_color, -1, cv2.LINE_AA)
-    title = f'{getattr(composer, "preset", "CV-DAW")}  |  BPM {composer.bpm:.0f}'
+    cv2.circle(image, (20, 22), 7, status_color, -1, cv2.LINE_AA)
+    bpm_tag = 'LOCK' if getattr(composer, 'tempo_lock', False) else (
+        f'SYNC:{getattr(composer, "bpm_sync_source", "").upper()}'
+        if getattr(composer, 'bpm_synced', False)
+        else 'AUTO'
+    )
+    style_idx = (STYLE_ORDER.index(composer.genre_key) + 1) if getattr(composer, 'genre_key', '') in STYLE_ORDER else 1
+    section = getattr(composer, 'section', 'INTRO')
+    bar_num = getattr(composer, 'bar_in_cycle', 0) + 1
     chord_name = getattr(composer, 'current_chord_name', '')
-    if chord_name:
-        title += f'  |  {chord_name}'
-    cv2.putText(image, title, (38, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 244, 248), 2, cv2.LINE_AA)
-    cv2.putText(image, status_text, (w - 155, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.50, status_color, 1, cv2.LINE_AA)
+    title = f'[{style_idx}/{len(STYLE_ORDER)}] {getattr(composer, "preset", "CV-DAW")} | {composer.bpm:.0f} BPM ({bpm_tag}) | {chord_name} | {section} [{bar_num}/4]'
+    cv2.putText(image, title, (34, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 244, 248), 2, cv2.LINE_AA)
+    cv2.putText(image, status_text, (w - 135, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.44, status_color, 1, cv2.LINE_AA)
+
+    footer = 'Estilos: [N/P] o [1-9,0,-,=] (12 estilos)  |  [T] Lock BPM  |  [q] Salir'
+    cv2.putText(image, footer, (16, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (215, 222, 232), 1, cv2.LINE_AA)
 
     if not features.tracked:
         cv2.putText(
             image,
-            'Necesito ver hombros, caderas y al menos una mano (alejate para incluir piernas)',
-            (18, 66),
+            'Necesito ver hombros, caderas y al menos una mano (alejate para incluir todo el cuerpo)',
+            (18, 72),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.46,
             (180, 190, 210),
             1,
             cv2.LINE_AA,
@@ -63,23 +100,90 @@ def draw_hud(cv2, image, features, composer):
 
     meters = (
         ('Energia', features.energy, (60, 210, 255)),
-        ('Expansion', features.expansion, (120, 230, 130)),
-        ('Fluidez', features.fluidity, (240, 170, 90)),
-        ('Altura', 0.5 * (features.left_height + features.right_height), (220, 130, 245)),
+        ('Brazo Izq', features.left_height, (130, 220, 255)),
+        ('Brazo Der', features.right_height, (220, 130, 245)),
+        ('Hombros', max(features.shoulder_lift, features.shoulder_bounce), (70, 220, 150)),
     )
-    bar_w = max(70, (w - 60) // len(meters) - 20)
+    bar_w = max(70, (w - 52) // len(meters) - 16)
     for idx, (label, val, color) in enumerate(meters):
-        x0 = 18 + idx * (bar_w + 20)
+        x0 = 16 + idx * (bar_w + 16)
         y0 = 56
-        cv2.putText(image, f'{label} {val:.2f}', (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 216, 224), 1, cv2.LINE_AA)
-        cv2.rectangle(image, (x0, y0), (x0 + bar_w, y0 + 12), (55, 60, 72), -1)
+        cv2.putText(image, f'{label} {val:.2f}', (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (210, 216, 224), 1, cv2.LINE_AA)
+        cv2.rectangle(image, (x0, y0), (x0 + bar_w, y0 + 10), (55, 60, 72), -1)
         fill = int(bar_w * max(0.0, min(1.0, val)))
         if fill > 0:
-            cv2.rectangle(image, (x0, y0), (x0 + fill, y0 + 12), color, -1)
+            cv2.rectangle(image, (x0, y0), (x0 + fill, y0 + 10), color, -1)
 
-    footer = 'Teclas: [1] Ambient  [2] House  [3] Lo-Fi  [4] Cinematic  |  [q] Salir'
-    cv2.putText(image, footer, (18, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 225, 235), 1, cv2.LINE_AA)
+    body_line = (
+        f'Cabeza tilt:{features.head_tilt:+.2f} pitch:{features.head_pitch:.2f}  |  '
+        f'Hombros shrug:{features.shoulder_lift:.2f} bounce:{features.shoulder_bounce:.2f}  |  '
+        f'Cadera sway:{features.hip_sway:+.2f} nivel:{features.body_level:.2f}'
+    )
+    cv2.putText(image, body_line, (16, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (185, 205, 225), 1, cv2.LINE_AA)
+
+    # Live expressive badges so the user immediately sees Head & Shoulder musical triggers.
+    badges = []
+    if section == 'BUILDUP':
+        badges.append(('SHRUG BUILD-UP!', (40, 195, 255)))
+    elif section == 'DROP':
+        badges.append(('DROP!', (220, 90, 255)))
+    if getattr(composer, 'head_harmony_active', False):
+        badges.append(('HEAD HARMONY + ECHO', (235, 145, 255)))
+    if getattr(composer, 'shoulder_groove_active', False):
+        badges.append(('SHOULDER GROOVE', (100, 240, 180)))
+    if flash_state:
+        now = time.monotonic()
+        for key_name, color in (('nod', (100, 255, 130)), ('left', (80, 235, 255)), ('right', (255, 165, 235))):
+            txt, until = flash_state.get(key_name, ('', 0.0))
+            if now < until and txt:
+                badges.append((txt, color))
+
+    bx = 16
+    for text, color in badges:
+        cv2.putText(image, text, (bx, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.46, color, 2, cv2.LINE_AA)
+        bx += max(110, len(text) * 10 + 16)
     return image
+
+
+class AsyncPoseWorker:
+    """Runs MediaPipe pose inference on a dedicated thread so the musical clock never stalls."""
+
+    def __init__(self, capture, detector):
+        self._capture = capture
+        self._detector = detector
+        self._lock = threading.Lock()
+        self._latest = None
+        self._seq = 0
+        self._error = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                timestamp, image = self._capture.get()
+                points = self._detector.process(image, timestamp)
+            except Exception as exc:
+                if not self._stop.is_set():
+                    with self._lock:
+                        self._error = exc
+                break
+            with self._lock:
+                self._seq += 1
+                self._latest = (self._seq, timestamp, image, points)
+
+    def poll(self, last_seq: int):
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            if self._latest is None or self._latest[0] == last_seq:
+                return None
+            return self._latest
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=3)
 
 
 def start_engine(args):
@@ -183,10 +287,11 @@ class LatestCamera:
 def main():
     p=argparse.ArgumentParser(description='Compositor Contemporary Ambient controlado por danza')
     p.add_argument('--mode',choices=('mock','camera','video'),default='camera')
-    p.add_argument('--genre',choices=GENRE_ORDER,default='ambient',help='Género musical inicial (cambiable en vivo con teclas 1-4)')
+    p.add_argument('--genre','--style',dest='genre',choices=STYLE_ORDER,default='ambient',help='Estilo musical inicial (12 estilos JSON; N/P o 1-9,0,-,= en vivo)')
     p.add_argument('--video',type=Path)
     p.add_argument('--camera',type=int,default=None,help='Índice manual; por defecto se prefiere la webcam integrada del Mac sobre el iPhone')
     p.add_argument('--pose-model',choices=('full','lite'),default='full',help='Modelo MediaPipe Tasks (.task en models/)')
+    p.add_argument('--tempo-lock',action='store_true',help='Bloquea el BPM inicial en lugar de sincronizarlo al ritmo corporal')
     p.add_argument('--no-mirror',action='store_true',help='Desactiva el efecto espejo en la ventana de cámara')
     p.add_argument('--seconds',type=float,default=0,help='0 = hasta q o Control+C')
     p.add_argument('--seed',type=int,default=7)
@@ -206,9 +311,10 @@ def main():
         p.error('--mode video requiere --video archivo.mp4')
     if (args.record or args.offline_audio) and not args.launch_engine:
         p.error('--record y --offline-audio requieren --launch-engine')
-    process=None;bridge=None;capture=None;detector=None;cv2=None
+    process=None;bridge=None;capture=None;detector=None;pose_worker=None;cv2=None
     started=time.monotonic();frames=0;tracked_frames=0;max_loop=0;energies=[];probes=[];notes=0
-    composer=Composer(args.seed,genre=args.genre);extractor=FeatureExtractor()
+    composer=Composer(args.seed,genre=args.genre,tempo_lock=args.tempo_lock);extractor=FeatureExtractor()
+    flash_state={'left':('',0.0),'right':('',0.0),'nod':('',0.0)}
     report={}
     try:
         # Open vision before starting audio so permission prompts never leave a
@@ -221,11 +327,12 @@ def main():
                 camera_index,camera_name=resolve_camera(args.camera)
                 print(f'Cámara: {camera_name} — índice OpenCV {camera_index}',flush=True)
                 capture=LatestCamera(cv2,camera_index)
+                pose_worker=AsyncPoseWorker(capture,detector)
             else:
                 capture=cv2.VideoCapture(str(args.video))
                 if not capture.isOpened():
                     raise RuntimeError('No se puede leer el vídeo')
-            video_fps=capture.get(cv2.CAP_PROP_FPS) if args.mode=='video' else 30
+            video_fps=capture.get(cv2.CAP_PROP_FPS) if args.mode=='video' else 60
             if not video_fps or video_fps<1:
                 video_fps=30
         if args.launch_engine:
@@ -238,7 +345,9 @@ def main():
             cv2.namedWindow('CV-DAW Contemporary Ambient',cv2.WINDOW_NORMAL)
             cv2.resizeWindow('CV-DAW Contemporary Ambient',960,720)
             print('Vista de vídeo abierta. Selecciona la ventana y pulsa q para salir.',flush=True)
-        print('Contemporary Ambient — mueve todo el cuerpo; q o Control+C para salir.',flush=True)
+        print(f'{composer.preset} — mueve brazos, cabeza, torso y cadera; 1-4 género, T lock BPM, q salir.',flush=True)
+        last_pose_seq=0
+        last_features=extractor.missing()
         while not args.seconds or time.monotonic()-started<args.seconds:
             begin=time.monotonic()
             if process and process.poll() is not None:
@@ -246,32 +355,61 @@ def main():
             elapsed=begin-started
             if args.mode=='mock':
                 features=mock_features(elapsed)
-            else:
-                if args.mode=='camera':
-                    timestamp,image=capture.get()
+            elif args.mode=='camera':
+                polled=pose_worker.poll(last_pose_seq)
+                if polled is not None:
+                    last_pose_seq,timestamp,image,points=polled
+                    needed=(11,12,23,24)
+                    if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
+                        features=extractor.update(points,timestamp,image.shape[0]/image.shape[1],bpm_range=composer.bpm_sync_range())
+                    else:
+                        features=extractor.missing(timestamp)
+                    last_features=features
+                    if features.left_strike!=0:
+                        flash_state['left']=(f'IZQ {"ARRIBA" if features.left_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                    if features.right_strike!=0:
+                        flash_state['right']=(f'DER {"ARRIBA" if features.right_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                    if features.head_nod:
+                        flash_state['nod']=('HEAD NOD!',time.monotonic()+0.30)
+                    if not args.no_window:
+                        detector.draw(image,points)
+                        display=cv2.flip(image,1) if not args.no_mirror else image
+                        draw_hud(cv2,display,features,composer,flash_state)
+                        cv2.imshow('CV-DAW Contemporary Ambient',display)
                 else:
-                    ok,image=capture.read()
-                    if not ok:
+                    # Keep musical clock ticking smoothly without duplicating one-shot events.
+                    if (last_features.left_strike!=0 or last_features.right_strike!=0 or last_features.head_nod or last_features.shoulder_drop):
+                        features=last_features.__class__(**{**last_features.to_dict(),'left_strike':0,'right_strike':0,'head_nod':False,'shoulder_drop':False})
+                    else:
+                        features=last_features
+                if not args.no_window:
+                    key=cv2.waitKey(1)&0xff
+                    if handle_window_key(key,composer):
                         break
-                    timestamp=time.monotonic()
+            else:
+                ok,image=capture.read()
+                if not ok:
+                    break
+                timestamp=time.monotonic()
                 points=detector.process(image,timestamp)
                 needed=(11,12,23,24)
                 if points and all(points[i][3]>.5 for i in needed) and any(points[i][3]>.5 for i in (15,16)):
-                    features=extractor.update(points,timestamp,image.shape[0]/image.shape[1])
+                    features=extractor.update(points,timestamp,image.shape[0]/image.shape[1],bpm_range=composer.bpm_sync_range())
                 else:
                     features=extractor.missing(timestamp)
+                if features.left_strike!=0:
+                    flash_state['left']=(f'IZQ {"ARRIBA" if features.left_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                if features.right_strike!=0:
+                    flash_state['right']=(f'DER {"ARRIBA" if features.right_strike>0 else "ABAJO"}!',time.monotonic()+0.35)
+                if features.head_nod:
+                    flash_state['nod']=('HEAD NOD!',time.monotonic()+0.30)
                 if not args.no_window:
                     detector.draw(image,points)
-                    display=cv2.flip(image,1) if (args.mode=='camera' and not args.no_mirror) else image
-                    draw_hud(cv2,display,features,composer)
-                    cv2.imshow('CV-DAW Contemporary Ambient',display)
+                    draw_hud(cv2,image,features,composer,flash_state)
+                    cv2.imshow('CV-DAW Contemporary Ambient',image)
                     key=cv2.waitKey(1)&0xff
-                    if key==ord('q'):
+                    if handle_window_key(key,composer):
                         break
-                    if key in (ord('1'),ord('2'),ord('3'),ord('4')):
-                        selected=GENRE_ORDER[key-ord('1')]
-                        composer.set_genre(selected)
-                        print(f'Género cambiado a: {composer.preset}',flush=True)
             frame=bridge.metric(0)
             events=composer.update(features,frame,elapsed)
             bridge.controls(composer.controls(features))
@@ -282,7 +420,7 @@ def main():
             energies.append(features.energy)
             frames+=1
             max_loop=max(max_loop,(time.monotonic()-begin)*1000)
-            rate=video_fps if args.mode=='video' else 30
+            rate=video_fps if args.mode=='video' else (60 if args.mode=='camera' else 30)
             delay=1/rate-(time.monotonic()-begin)
             if delay>0:
                 time.sleep(delay)
@@ -316,6 +454,8 @@ def main():
             output,_=process.communicate(timeout=5)
             if output:
                 print(output.strip())
+        if pose_worker:
+            pose_worker.close()
         if isinstance(capture,LatestCamera):
             capture.close()
         elif capture:

@@ -1,0 +1,47 @@
+{
+  "key": "techno",
+  "label": "Melodic Techno",
+  "order": 9,
+  "base_midi": 45,
+  "scale": [0, 2, 3, 5, 7, 8, 10],
+  "bpm_default": 130,
+  "bpm_min": 124,
+  "bpm_max": 138,
+  "swing": 0.02,
+  "presets": [8, 10, 11, 12],
+  "strum_ms": 8,
+  "progression": [
+    {"degree": 0, "name": "Am", "voicing": [0, 2, 4, 7]},
+    {"degree": 0, "name": "Am(add9)", "voicing": [0, 2, 4, 8]},
+    {"degree": 5, "name": "Fmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "G5", "voicing": [0, 4, 7, 9]}
+  ],
+  "bright_chord": {"degree": 5, "name": "Fmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Em7", "voicing": [0, 2, 4, 6]},
+  "comping_steps": [0, 8],
+  "chord_duration_s": 1.8,
+  "motifs": {
+    "a": [[0, 0, 2], [2, 4, 2], [4, 2, 2], [6, 4, 2], [8, 0, 2], [10, 4, 2], [12, 6, 2], [14, 4, 2]],
+    "b": [[0, 4, 2], [2, 7, 2], [4, 6, 2], [6, 4, 2], [8, 7, 2], [10, 9, 2], [12, 7, 2], [14, 4, 2]]
+  },
+  "bass_pattern": [[0, 0, 1], [1, 0, 1], [2, 0, 2], [4, 0, 1], [6, 0, 2], [8, 0, 1], [10, 0, 2], [12, 0, 1], [14, 4, 2]],
+  "drums": {
+    "kick_groove": [0, 4, 8, 12],
+    "kick_full": [0, 4, 8, 12],
+    "snare": [4, 12],
+    "hat_groove": [2, 6, 10, 14],
+    "hat_full": [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15],
+    "open_hat": [2, 6, 10, 14],
+    "ghost_snare": [3, 11],
+    "fill_bar4": [[12, 36], [13, 36], [14, 38], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [380, 6800],
+    "cutoff_lead": [700, 12500],
+    "reverb_pad": [0.35, 0.78],
+    "reverb_lead": [0.30, 0.70],
+    "delay_send": 0.48,
+    "resonance": 1.65,
+    "sidechain": 0.72
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "key": "lofi",
+  "label": "Lo-Fi Chill",
+  "order": 3,
+  "base_midi": 48,
+  "scale": [0, 2, 3, 5, 7, 9, 10],
+  "bpm_default": 82,
+  "bpm_min": 72,
+  "bpm_max": 92,
+  "swing": 0.20,
+  "presets": [9, 9, 11, 12],
+  "strum_ms": 26,
+  "progression": [
+    {"degree": 0, "name": "Cm9", "voicing": [0, 2, 4, 6]},
+    {"degree": 3, "name": "F13", "voicing": [0, 2, 4, 6]},
+    {"degree": 6, "name": "Bbmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 2, "name": "Ebmaj9", "voicing": [0, 2, 4, 8]}
+  ],
+  "bright_chord": {"degree": 2, "name": "Ebmaj9", "voicing": [0, 2, 4, 8]},
+  "tension_chord": {"degree": 4, "name": "Gm9", "voicing": [0, 2, 4, 8]},
+  "comping_steps": [0, 10],
+  "chord_duration_s": 2.4,
+  "motifs": {
+    "a": [[0, 2, 3], [4, 4, 2], [7, 2, 3], [12, 0, 3]],
+    "b": [[0, 4, 2], [3, 5, 3], [8, 4, 2], [11, 2, 2], [14, 0, 2]]
+  },
+  "bass_pattern": [[0, 0, 4], [7, 0, 2], [10, 4, 4]],
+  "drums": {
+    "kick_groove": [0, 10],
+    "kick_full": [0, 7, 10],
+    "snare": [4, 12],
+    "hat_groove": [0, 4, 8, 12],
+    "hat_full": [0, 2, 4, 6, 8, 10, 12, 14],
+    "open_hat": [14],
+    "ghost_snare": [9, 15],
+    "fill_bar4": [[12, 38], [14, 36], [15, 38]]
+  },
+  "fx": {
+    "cutoff_pad": [520, 4000],
+    "cutoff_lead": [850, 5200],
+    "reverb_pad": [0.26, 0.58],
+    "reverb_lead": [0.22, 0.48],
+    "delay_send": 0.24,
+    "resonance": 0.80,
+    "sidechain": 0.25
+  }
+}

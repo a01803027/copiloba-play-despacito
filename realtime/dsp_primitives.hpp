@@ -121,7 +121,7 @@ struct Voice {
   increment=tables.increments[n];band=uint8_t(tables.band_for(increment));
   gain=velocity;preset_id=uint8_t(preset);
   drum=(preset==6 || preset==7)?uint8_t(preset-5):0;
-  noise=1;is_sample=preset>=2 && preset<6;is_sine=preset==1;
+  noise=1;is_sample=(preset>=2 && preset<6) || preset==12;is_sine=preset==1;
   sample=asset;active=!is_sample || (sample.samples && sample.frames);
   mod_env=1.0f;
   // Configure musical envelopes per preset while keeping presets 0..7 unchanged.
@@ -133,6 +133,10 @@ struct Voice {
    envelope.configure(3.f,220.f,.28f,220.f);max_age=2*sample_rate;
   }else if(preset==11){ // Deep Sub / Warm Bass
    envelope.configure(5.f,180.f,.68f,140.f);max_age=2*sample_rate;
+  }else if(preset==12){ // Polyphonic Drum Kit (note 42=tight hat, 46=open hat, 36=kick, 38=snare)
+   if(n==42){envelope.configure(1.f,45.f,.08f,55.f);max_age=uint32_t(0.10f*sample_rate);}
+   else if(n==46){envelope.configure(1.f,220.f,.22f,260.f);max_age=uint32_t(0.35f*sample_rate);}
+   else{envelope.configure(1.f,140.f,.65f,120.f);max_age=uint32_t(0.60f*sample_rate);}
   }else{
    envelope.configure(3.f,80.f,.55f,120.f);max_age=2*sample_rate;
   }
@@ -160,47 +164,50 @@ struct Voice {
    phase+=increment*bend_ratio*(1+tail*tail*(drum==1?3:1));phase-=unsigned(phase);
    if(age+1==duration)active=false;
   }else if(preset_id==8){
-   // Warm Unison Pad: 3 detuned stereo oscillators (saw + triangle warmth).
+   // Warm Unison Pad: 3 detuned stereo oscillators (velocity-to-timbre saw/triangle blend).
    float inc=std::min(increment*bend_ratio,.45f);
-   float s_c=0.55f*tables.triangle(phase,band)+0.45f*tables.oscillator(phase,band,false);
-   float s_l=0.60f*tables.oscillator(phase2,band,false)+0.40f*tables.triangle(phase2,band);
-   float s_r=0.60f*tables.oscillator(phase3,band,false)+0.40f*tables.triangle(phase3,band);
+   float saw_mix=0.28f+0.42f*gain;
+   float tri_mix=1.f-saw_mix;
+   float s_c=tri_mix*tables.triangle(phase,band)+saw_mix*tables.oscillator(phase,band,false);
+   float s_l=saw_mix*tables.oscillator(phase2,band,false)+tri_mix*tables.triangle(phase2,band);
+   float s_r=saw_mix*tables.oscillator(phase3,band,false)+tri_mix*tables.triangle(phase3,band);
    float scale=env*gain*0.14f;
    out={(s_c*0.55f+s_l*0.75f+s_r*0.25f)*scale,(s_c*0.55f+s_r*0.75f+s_l*0.25f)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
    phase2+=std::min(inc*0.9948f,.45f);if(phase2>=1.f)phase2-=1.f; // -9 cents
    phase3+=std::min(inc*1.0052f,.45f);if(phase3>=1.f)phase3-=1.f; // +9 cents
   }else if(preset_id==9){
-   // FM Warm Keys (Rhodes-like 2-op FM bell attack + warm body).
+   // FM Warm Keys (Rhodes-like 2-op FM bell attack scaled by velocity + warm body).
    float inc=std::min(increment*bend_ratio,.45f);
    mod_env*=0.99985f;
-   float mod=tables.oscillator(phase2,band,true)*(0.12f+1.35f*mod_env*mod_env);
+   float vel_mod=0.55f+0.85f*gain;
+   float mod=tables.oscillator(phase2,band,true)*(0.10f+1.35f*vel_mod*mod_env*mod_env);
    float p_mod=phase+mod*0.16f;p_mod-=std::floor(p_mod);
    float body=tables.oscillator(p_mod,band,true);
-   float shimmer=tables.oscillator(phase3,band,true)*0.12f*mod_env;
+   float shimmer=tables.oscillator(phase3,band,true)*0.14f*vel_mod*mod_env;
    float scale=env*gain*0.22f;
    out={(body+shimmer)*scale,(body-shimmer*0.7f)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
    phase2+=std::min(inc*2.0f,.45f);if(phase2>=1.f)phase2-=1.f;
    phase3+=std::min(inc*3.004f,.45f);if(phase3>=1.f)phase3-=1.f;
   }else if(preset_id==10){
-   // Supersaw / Pluck Lead: stereo detuned saws + warm fundamental sine.
+   // Supersaw / Pluck Lead: stereo detuned saws + warm fundamental sine (velocity-to-timbre).
    float inc=std::min(increment*bend_ratio,.45f);
    mod_env*=0.99975f;
    float sl=tables.oscillator(phase2,band,false);
    float sr=tables.oscillator(phase3,band,false);
    float sub=tables.oscillator(phase,band,true);
-   float bright=0.35f+0.65f*mod_env;
+   float bright=(0.28f+0.72f*mod_env)*(0.55f+0.45f*gain);
    float scale=env*gain*0.16f;
    out={(sub*0.45f+(sl*0.75f+sr*0.25f)*bright)*scale,(sub*0.45f+(sr*0.75f+sl*0.25f)*bright)*scale};
    phase+=inc;if(phase>=1.f)phase-=1.f;
    phase2+=std::min(inc*0.9960f,.45f);if(phase2>=1.f)phase2-=1.f; // -7 cents
    phase3+=std::min(inc*1.0040f,.45f);if(phase3>=1.f)phase3-=1.f; // +7 cents
   }else if(preset_id==11){
-   // Deep Sub / Warm Bass: clean sine sub + subtle warm harmonic.
+   // Deep Sub / Warm Bass: clean sine sub + subtle velocity-driven warm harmonic.
    float inc=std::min(increment*bend_ratio,.45f);
    float sub=tables.oscillator(phase,band,true);
-   float harm=tables.triangle(phase2,band)*0.30f;
+   float harm=tables.triangle(phase2,band)*(0.20f+0.25f*gain);
    float v=(sub+harm)*env*gain*0.26f;
    out={v,v};
    phase+=inc;if(phase>=1.f)phase-=1.f;
