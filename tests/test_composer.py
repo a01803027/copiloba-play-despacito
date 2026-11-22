@@ -123,9 +123,9 @@ class ComposerTests(unittest.TestCase):
         self.assertGreater(f.lateral_balance,0.0)
 
     def test_all_genres_produce_distinct_musical_output(self):
-        from composer.genres import GENRE_ORDER
+        from composer.styles import STYLE_ORDER
         bpms={}
-        for genre in GENRE_ORDER:
+        for genre in STYLE_ORDER:
             brain=Composer(seed=7,genre=genre)
             events=[]
             for n in range(180):

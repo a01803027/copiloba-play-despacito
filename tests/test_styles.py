@@ -24,6 +24,8 @@ class StyleRegistryTests(unittest.TestCase):
             self.assertLessEqual(style.bpm_default, style.bpm_max)
             identities.add((style.presets, int(style.bpm_default), style.base_midi))
         self.assertEqual(len(identities), 6)
+        drum_kits = {get_style(k).presets[3] for k in expected}
+        self.assertEqual(drum_kits, {12, 13, 14, 15, 16, 17})
 
     def test_navigation_cycles_cleanly(self):
         first = STYLE_ORDER[0]

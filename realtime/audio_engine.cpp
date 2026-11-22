@@ -41,43 +41,86 @@ std::vector<float> load_wav(const char* path,uint64_t max_frames){
  return data;
 }
 struct Assets {
+ static constexpr unsigned kit_count=6;
  Wavetables tables;
  std::array<std::vector<float>,4> samples;
- Assets(){
-  uint32_t rng=1234567;
-  for(auto& data:samples)data.resize(24000*2);
-  double kick_phase=0,prev_noise=0,snare_lp=0,snare_hp=0,hat_hp=0,hat_lp=0,click_lp=0;
-  for(unsigned n=0;n<24000;++n){double t=double(n)/sample_rate;
+ std::array<std::array<std::vector<float>,4>,kit_count> kits;
+ static void build_kit(std::array<std::vector<float>,4>& out,unsigned kit_id,uint32_t seed){
+  uint32_t rng=seed;
+  for(auto& data:out)data.resize(24000*2);
+  double kick_phase=0,prev_noise=0,snare_hp=0,snare_lp=0,hat_hp=0,hat_lp=0,click_lp=0;
+  // Per-genre acoustic parameters:
+  // 0: House 909, 1: Lo-Fi Boom-Bap, 2: Latin/Afro, 3: 80s Synthwave, 4: Liquid DnB, 5: Organic Ambient
+  constexpr double k_lo[6]  ={ 46,  45,  50,  52,  56,  44};
+  constexpr double k_hi[6]  ={125,  85,  90, 130, 145,  60};
+  constexpr double k_dec[6] ={14.5,12.0,15.0,13.0,22.0,10.0};
+  constexpr double k_drv[6] ={1.45,1.25,1.20,1.50,1.55,1.05};
+  constexpr double s_f[6]   ={185, 175, 420, 210, 235, 520};
+  constexpr double s_dec[6] ={22.0,26.0,32.0,11.0,28.0,24.0};
+  constexpr double s_lp_a[6]={0.42,0.28,0.34,0.46,0.48,0.22};
+  constexpr double h_dec[6] ={46.0,38.0,55.0,44.0,58.0,26.0};
+  constexpr double h_lp_a[6]={0.48,0.30,0.40,0.50,0.52,0.26};
+  for(unsigned n=0;n<24000;++n){
+   double t=double(n)/sample_rate;
+   double ramp=std::min(1.0,t/0.0012);
    rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;double noise=double(rng)/UINT32_MAX*2-1;
-   // Band-limited studio noise filters (zero raw Nyquist white-noise hiss!).
    double prev_n=prev_noise;prev_noise=noise;
    double hp1=noise-0.86*prev_n;
-   click_lp+=0.34*(hp1-click_lp); // ~3.0 kHz warm beater click
-   snare_hp=0.92*(snare_hp+noise-prev_n); // ~650 Hz HPF
-   snare_lp+=0.42*(snare_hp-snare_lp); // ~4.2 kHz warm LPF (crisp snap, zero static hiss)
-   hat_hp=0.68*(hat_hp+hp1); // ~3 kHz HPF
-   hat_lp+=0.48*(hat_hp-hat_lp); // ~6.4 kHz silky LPF (kills >10 kHz hiss completely)
-   // Smooth 1.2ms attack ramp guarantees zero sample-start click on every drum hit.
-   double ramp=std::min(1.0,t/0.0012);
-   // Punchy club Kick (165 Hz -> 46 Hz fast drop) + warm 3ms beater transient.
-   kick_phase+=2*std::numbers::pi*(46+120*std::exp(-52*t))/sample_rate;
-   double kick_body=std::sin(kick_phase)*std::exp(-13.5*t);
-   double kick_punch=0.30*std::sin(2*std::numbers::pi*110*t)*std::exp(-36*t);
-   double kick=ramp*0.74*std::tanh(1.40*(kick_body+kick_punch+0.26*click_lp*std::exp(-320*t)));
-   // Warm tight Studio Snare / Clap (subtle 185 Hz wood body + smooth 650-4200 Hz band-passed clap tail, zero plastic pop).
-   double clap_env=std::exp(-22*t)+(t>0.010?0.55*std::exp(-24*(t-0.010)):0.0)+(t>0.020?0.35*std::exp(-26*(t-0.020)):0.0);
-   double snare_body=0.18*std::sin(2*std::numbers::pi*185*t)*std::exp(-20*t);
-   double snare=ramp*0.72*std::tanh(1.15*(snare_body+0.68*snare_lp*clap_env));
-   // Silky Studio Hi-Hat (warm metallic ratios + 3-6.4 kHz air, fast clean decay).
-   double metal=0.45*std::sin(2*std::numbers::pi*3420*t)*std::sin(2*std::numbers::pi*4870*t)+0.35*std::sin(2*std::numbers::pi*6410*t);
-   double hat=ramp*(0.45*hat_lp+0.35*metal)*std::exp(-46*t)*0.66;
-   // Warm minor-9th chord stab.
+   click_lp+=0.34*(hp1-click_lp);
+   snare_hp=0.92*(snare_hp+noise-prev_n);
+   snare_lp+=s_lp_a[kit_id]*(snare_hp-snare_lp);
+   hat_hp=0.68*(hat_hp+hp1);
+   hat_lp+=h_lp_a[kit_id]*(hat_hp-hat_lp);
+
+   // Kick tailored to genre
+   kick_phase+=2*std::numbers::pi*(k_lo[kit_id]+k_hi[kit_id]*std::exp(-54*t))/sample_rate;
+   double kick_body=std::sin(kick_phase)*std::exp(-k_dec[kit_id]*t);
+   double kick_punch=(kit_id==5?0.10:0.28)*std::sin(2*std::numbers::pi*115*t)*std::exp(-38*t);
+   double click_amt=(kit_id==5?0.06:(kit_id==1?0.12:0.26));
+   double kick=ramp*(kit_id==5?0.58:0.72)*std::tanh(k_drv[kit_id]*(kick_body+kick_punch+click_amt*click_lp*std::exp(-320*t)));
+
+   // Snare / Clap / Rimshot tailored to genre
+   double snare=0;
+   if(kit_id==0){ // House layered 909 clap
+    double clap_env=std::exp(-22*t)+(t>0.010?0.55*std::exp(-24*(t-0.010)):0.0)+(t>0.020?0.35*std::exp(-26*(t-0.020)):0.0);
+    snare=ramp*0.70*std::tanh(1.15*(0.16*std::sin(2*std::numbers::pi*185*t)*std::exp(-20*t)+0.68*snare_lp*clap_env));
+   }else if(kit_id==2){ // Latin woody cross-stick rimshot / conga slap
+    double wood=(0.55*std::sin(2*std::numbers::pi*420*t)+0.35*std::sin(2*std::numbers::pi*880*t))*std::exp(-34*t);
+    snare=ramp*0.72*std::tanh(1.10*(wood+0.28*snare_lp*std::exp(-38*t)));
+   }else if(kit_id==3){ // 80s Synthwave big gated snare
+    double gate=(t<0.165)?1.0:std::exp(-45*(t-0.165));
+    double body=0.30*std::sin(2*std::numbers::pi*210*t)*std::exp(-16*t);
+    snare=ramp*0.74*std::tanh(1.20*(body+0.62*snare_lp*std::exp(-s_dec[kit_id]*t))*gate);
+   }else if(kit_id==5){ // Ambient delicate wooden rim tap
+    double tap=(0.50*std::sin(2*std::numbers::pi*520*t)+0.25*std::sin(2*std::numbers::pi*1040*t))*std::exp(-26*t);
+    snare=ramp*0.42*(tap+0.15*snare_lp*std::exp(-28*t));
+   }else{ // Lo-Fi (1) dusty snare & DnB (4) crisp breakbeat crack
+    double body=(kit_id==4?0.34:0.26)*std::sin(2*std::numbers::pi*s_f[kit_id]*t)*std::exp(-24*t);
+    snare=ramp*0.72*std::tanh(1.20*(body+0.64*snare_lp*std::exp(-s_dec[kit_id]*t)));
+   }
+
+   // Hi-hat / Shaker tailored to genre
+   double metal=0.42*std::sin(2*std::numbers::pi*3420*t)*std::sin(2*std::numbers::pi*4870*t)+0.32*std::sin(2*std::numbers::pi*6410*t);
+   double hat_mix=(kit_id==2)?(0.75*hat_lp+0.10*metal):(0.45*hat_lp+0.34*metal);
+   double hat=ramp*hat_mix*std::exp(-h_dec[kit_id]*t)*(kit_id==5?0.42:0.62);
+
+   // Warm minor-9th chord stab
    double stab=ramp*(std::sin(2*std::numbers::pi*523.25*t)+0.7*std::sin(2*std::numbers::pi*622.25*t)+0.6*std::sin(2*std::numbers::pi*783.99*t)+0.5*std::sin(2*std::numbers::pi*1174.66*t))*std::exp(-7.5*t)*0.30;
    std::array<float,4> value{float(kick),float(snare),float(hat),float(stab)};
-   for(unsigned j=0;j<4;++j)samples[j][2*n]=samples[j][2*n+1]=value[j];
+   for(unsigned j=0;j<4;++j)out[j][2*n]=out[j][2*n+1]=value[j];
   }
  }
+ Assets(){
+  for(unsigned k=0;k<kit_count;++k)build_kit(kits[k],k,1234567u+k*97531u);
+  samples=kits[0]; // default kit (House 909)
+ }
  std::array<SampleView,4> views()const{std::array<SampleView,4> result;for(unsigned i=0;i<4;++i)result[i]={samples[i].data(),uint32_t(samples[i].size()/2),2};return result;}
+ std::array<std::array<SampleView,4>,kit_count> kit_views()const{
+  std::array<std::array<SampleView,4>,kit_count> result{};
+  for(unsigned k=0;k<kit_count;++k)
+   for(unsigned i=0;i<4;++i)result[k][i]={kits[k][i].data(),uint32_t(kits[k][i].size()/2),2};
+  return result;
+ }
 };
 struct LiveTap {
  SpscQueue<Stereo,131072> fifo; // ~2.73 s preallocated lock-free buffer
@@ -158,13 +201,14 @@ int main(int argc,char** argv){try{
   else throw std::runtime_error("usage: cv-daw-engine [--performance BPM] [--samples kick.wav snare.wav hat.wav stab.wav] [--stems BPM drums.wav bass.wav vocals.wav other.wav] [--stretch-stems] [--offline BLOCKS]");
  }
  if((std::bit_cast<uint64_t>(source_bpm)&0x7ff0000000000000ull)==0x7ff0000000000000ull)throw std::runtime_error("source BPM must be finite");
- auto assets=std::make_unique<Assets>();for(unsigned i=0;i<4;++i)if(sample_paths[i])assets->samples[i]=load_wav(sample_paths[i],sample_rate*15);
+ auto assets=std::make_unique<Assets>();for(unsigned i=0;i<4;++i)if(sample_paths[i]){assets->samples[i]=load_wav(sample_paths[i],sample_rate*15);assets->kits[0][i]=assets->samples[i];}
+ auto kit_views=assets->kit_views();
  SharedMemoryMapping mapping(true);auto& shared=mapping.get();auto stems=std::make_unique<StemBus>();
  shared.controls.target_bpm.store(float(initial_bpm));stems->requested_bpm.store(float(initial_bpm));
  std::unique_ptr<StemWorker> worker;
  if(stem_paths[0]){std::array<std::vector<float>,4> data;for(unsigned i=0;i<4;++i)data[i]=load_wav(stem_paths[i],uint64_t(sample_rate)*60*15);
   worker=std::make_unique<StemWorker>(*stems,std::move(data),source_bpm,initial_bpm,performance&&!stretch_stems);worker->wait_for_prebuffer();}
- auto engine=std::make_unique<AudioEngine>(shared,assets->tables,assets->views(),*stems,performance);
+ auto engine=std::make_unique<AudioEngine>(shared,assets->tables,assets->views(),*stems,performance,&kit_views);
  if(demo)shared.header.producer_claim.store(uint32_t(getpid()),std::memory_order_release);
  uint64_t last_demo_beat=UINT64_MAX;
  auto demo_step=[&]{
@@ -231,7 +275,7 @@ config.sampleRate=sample_rate;config.periodSizeInFrames=block_frames;config.peri
  // exist. Touch/warm DSP before locking; rebuild clock/voices before going live.
  {
   auto warm_shared=std::make_unique<SharedMemory>();auto warm_stems=std::make_unique<StemBus>();
-  auto warm_engine=std::make_unique<AudioEngine>(*warm_shared,assets->tables,assets->views(),*warm_stems);
+  auto warm_engine=std::make_unique<AudioEngine>(*warm_shared,assets->tables,assets->views(),*warm_stems,false,&kit_views);
   std::array<float,block_frames*2> warm{};warm_engine->processBlock(warm.data(),block_frames);
  }
  #ifdef __linux__

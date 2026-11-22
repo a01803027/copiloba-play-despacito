@@ -4,44 +4,44 @@
   "order": 1,
   "base_midi": 48,
   "scale": [0, 2, 3, 5, 7, 8, 10],
-  "bpm_default": 72,
+  "bpm_default": 74,
   "bpm_min": 66,
-  "bpm_max": 84,
-  "swing": 0.08,
-  "presets": [8, 14, 11, 12],
-  "strum_ms": 34,
+  "bpm_max": 86,
+  "swing": 0.06,
+  "presets": [8, 14, 11, 17],
+  "strum_ms": 38,
   "progression": [
     {"degree": 0, "name": "Cm9", "voicing": [0, 2, 4, 8]},
-    {"degree": 5, "name": "Abmaj7", "voicing": [0, 2, 4, 6]},
+    {"degree": 5, "name": "Abmaj9", "voicing": [0, 2, 4, 8]},
     {"degree": 3, "name": "Fm9", "voicing": [0, 2, 4, 8]},
-    {"degree": 4, "name": "Gm7", "voicing": [0, 2, 4, 6]}
+    {"degree": 4, "name": "Gm11", "voicing": [0, 2, 4, 6]}
   ],
   "bright_chord": {"degree": 5, "name": "Abmaj9", "voicing": [0, 2, 4, 8]},
   "tension_chord": {"degree": 4, "name": "Gm11", "voicing": [0, 2, 4, 6]},
   "comping_steps": [0],
-  "chord_duration_s": 3.6,
+  "chord_duration_s": 3.8,
   "motifs": {
-    "a": [[0, 4, 4], [6, 7, 4], [12, 9, 4]],
-    "b": [[0, 7, 4], [4, 9, 4], [10, 11, 4]]
+    "a": [[0, 4, 5], [8, 7, 5]],
+    "b": [[2, 7, 4], [8, 6, 4], [12, 4, 4]]
   },
   "bass_pattern": [[0, 0, 8], [8, 0, 6]],
   "drums": {
     "kick_groove": [0],
     "kick_full": [0, 10],
     "snare": [],
-    "hat_groove": [4, 12],
-    "hat_full": [2, 6, 10, 14],
-    "open_hat": [10],
+    "hat_groove": [8],
+    "hat_full": [4, 12],
+    "open_hat": [12],
     "ghost_snare": [12],
-    "fill_bar4": [[12, 42], [14, 46], [15, 49]]
+    "fill_bar4": [[12, 42], [14, 46]]
   },
   "fx": {
-    "cutoff_pad": [900, 9500],
-    "cutoff_lead": [1800, 13500],
-    "reverb_pad": [0.55, 0.90],
-    "reverb_lead": [0.45, 0.85],
-    "delay_send": 0.52,
-    "resonance": 0.80,
+    "cutoff_pad": [1100, 7200],
+    "cutoff_lead": [1800, 9500],
+    "reverb_pad": [0.58, 0.88],
+    "reverb_lead": [0.48, 0.82],
+    "delay_send": 0.50,
+    "resonance": 0.78,
     "sidechain": 0.14
   }
 }

@@ -36,10 +36,16 @@ public:
  }
 };
 class AudioEngine {
+ static constexpr unsigned drum_kit_count=6;
  SharedMemory& shared_;const Wavetables& tables_;std::array<SampleView,4> samples_;StemBus& stems_;
+ std::array<std::array<SampleView,4>,drum_kit_count> drum_kits_{};
  std::array<VoicePool,4> voices_{};
  std::array<std::array<CytomicSvf,2>,4> filters_{};
- std::array<std::array<OnePoleHpf,2>,2> hpf_{{{OnePoleHpf(185.f),OnePoleHpf(185.f)},{OnePoleHpf(220.f),OnePoleHpf(220.f)}}};
+ std::array<std::array<OnePoleHpf,2>,2> hpf_{{{OnePoleHpf(210.f),OnePoleHpf(210.f)},{OnePoleHpf(240.f),OnePoleHpf(240.f)}}};
+ StereoChorus pad_chorus_{};
+ PresenceEq pad_eq_{1250.f,0.85f,0.34f},lead_eq_{1850.f,0.85f,0.46f};
+ MonoSubCrossover mono_sub_{120.f};
+ MasterGlueCompressor glue_{};
  std::array<OnePoleSmoother,4> cutoff_{{OnePoleSmoother(8000,18),OnePoleSmoother(8000,18),OnePoleSmoother(8000,18),OnePoleSmoother(8000,18)}};
  std::array<OnePoleSmoother,4> send_{},bend_{};
  std::array<OnePoleSmoother,4> gain_{{OnePoleSmoother(1,16),OnePoleSmoother(1,16),OnePoleSmoother(1,16),OnePoleSmoother(1,16)}};
@@ -58,8 +64,15 @@ class AudioEngine {
  uint64_t current_grid_frame_=0;
  uint64_t next_grid_frame()const noexcept{return uint64_t(next_grid_+.5);}
  void trigger(unsigned limb,uint8_t note,float velocity)noexcept{
-  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset{};
-  if(p==12){
+  if(muted_[limb])return;unsigned p=preset_[limb];SampleView asset{};bool is_drum_kit=false;
+  if(limb==3 && p>=12 && p<12+drum_kit_count){
+   is_drum_kit=true;
+   unsigned kit_idx=p-12;
+   unsigned idx=(note==36)?0u:(note==38)?1u:(note==42 || note==46)?2u:3u;
+   asset=drum_kits_[kit_idx][idx].samples?drum_kits_[kit_idx][idx]:samples_[idx];
+   if(idx==0)sidechain_peak_=1.f;
+  }else if(p==12){
+   is_drum_kit=true;
    unsigned idx=(note==36)?0u:(note==38)?1u:(note==42 || note==46)?2u:3u;
    asset=samples_[idx];
    if(idx==0)sidechain_peak_=1.f;
@@ -70,7 +83,7 @@ class AudioEngine {
   }else if(p==6){
    sidechain_peak_=1.f;
   }
-  voices_[limb].note_on(note,velocity,p,tables_,asset);
+  voices_[limb].note_on(note,velocity,p,tables_,asset,is_drum_kit);
  }
  void execute(const AudioCommand& c)noexcept{
   unsigned l=unsigned(c.limb_id);
@@ -90,12 +103,16 @@ class AudioEngine {
   case EventType::NOTE_OFF:voices_[l].note_off(c.note_or_param);break;
   case EventType::MUTE_TOGGLE:muted_[l]=!muted_[l];if(muted_[l])voices_[l].silence();break;
   case EventType::LOOP_LOCK:locked_[l]=c.value>=.5f;break;
-  case EventType::PRESET_CHANGE:if(c.note_or_param<15)preset_[l]=c.note_or_param;else ++invalid_;break;
+  case EventType::PRESET_CHANGE:if(c.note_or_param<12+drum_kit_count)preset_[l]=c.note_or_param;else ++invalid_;break;
   case EventType::STEM_MUTE:break;
   }
  }
 public:
- AudioEngine(SharedMemory& s,const Wavetables& t,std::array<SampleView,4> samples,StemBus& stems,bool performance=false):shared_(s),tables_(t),samples_(samples),stems_(stems),performance_(performance){}
+ AudioEngine(SharedMemory& s,const Wavetables& t,std::array<SampleView,4> samples,StemBus& stems,bool performance=false,const std::array<std::array<SampleView,4>,drum_kit_count>* kits=nullptr)
+ :shared_(s),tables_(t),samples_(samples),stems_(stems),performance_(performance){
+  if(kits)drum_kits_=*kits;
+  else for(auto& k:drum_kits_)k=samples;
+ }
  uint64_t total_samples_rendered()const noexcept{return total_samples_rendered_;}
  double samples_per_sixteenth()const noexcept{return double(sample_rate)*15/bpm_.value();}
  // Pure bounded DSP/atomic memory operations. No clock calls, syscalls, allocators,
@@ -152,8 +169,14 @@ public:
     float bus_res=(l<2)?cur_res:.70710678f;
     filters_[l][0].coefficients(cutoff,bus_res);filters_[l][1].coefficients(cutoff,bus_res);
     bus.l=filters_[l][0].next(bus.l).low;bus.r=filters_[l][1].next(bus.r).low;
-    // Carve sub-bass mud out of Chords (limb 0) and Melody (limb 1) when using studio presets (8..14).
-    if(l<2 && preset_[l]>=8){bus.l=hpf_[l][0].next(bus.l);bus.r=hpf_[l][1].next(bus.r);}
+    // Carve sub-bass mud + add studio presence EQ & chorus on studio synth presets (8..14).
+    if(l==0 && preset_[l]>=8){
+     bus.l=hpf_[0][0].next(bus.l);bus.r=hpf_[0][1].next(bus.r);
+     bus=pad_eq_.next(pad_chorus_.next(bus,0.26f));
+    }else if(l==1 && preset_[l]>=8){
+     bus.l=hpf_[1][0].next(bus.l);bus.r=hpf_[1][1].next(bus.r);
+     bus=lead_eq_.next(bus);
+    }
     float limb_gain=gain_[l].next(lg[l]);
     if(l==0 && cur_sc>1e-4f)limb_gain*=(1.f-cur_sc*sidechain_env_);
     bus=apply_pan({bus.l*limb_gain,bus.r*limb_gain},pan_[l].next(pn[l]));
@@ -167,6 +190,10 @@ public:
    auto wet=reverb_.next(reverb_in);master.l+=wet.l*.38f;master.r+=wet.r*.38f;
    StemFrame stems{};if(stems_enabled && !stems_.frames.try_pop(stems))++starved_;
    for(unsigned l=0;l<4;++l){float vol=volume_[l].next(stem_muted_[l]?0:sv[l]);master.l+=stems.stem[l].l*vol;master.r+=stems.stem[l].r*vol;}
+   // Studio master bus chain: tight mono-sub (<120 Hz) + gentle SSL glue compression.
+   if(preset_[0]>=8 || preset_[1]>=8 || preset_[2]>=8 || preset_[3]>=12){
+    master=glue_.next(mono_sub_.next(master,1.14f));
+   }
    float gain=.62f+.28f*current_energy;output[2*n]=master.l*gain;output[2*n+1]=master.r*gain;
    if(!performance_)phase_+=current_bpm/(sample_rate*15.0);
   }

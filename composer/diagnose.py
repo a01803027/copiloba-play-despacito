@@ -108,18 +108,22 @@ def analyze_session(jsonl_path: Path, wav_path: Path | None = None) -> dict:
         else:
             feat_ranges[key] = {'min': 0.0, 'mean': 0.0, 'p90': 0.0, 'max': 0.0}
 
+    move_counts: dict[str, int] = {}
+    for fr in frames:
+        for mv in fr['features'].get('moves', ()) or ():
+            key = f'{mv["kind"]}:{mv["side"]}' if isinstance(mv, dict) else str(mv)
+            move_counts[key] = move_counts.get(key, 0) + 1
+
     triggers = {
-        'left_strike_up': sum(1 for fr in frames if fr['features'].get('left_strike', 0) > 0),
-        'left_strike_down': sum(1 for fr in frames if fr['features'].get('left_strike', 0) < 0),
-        'right_strike_up': sum(1 for fr in frames if fr['features'].get('right_strike', 0) > 0),
-        'right_strike_down': sum(1 for fr in frames if fr['features'].get('right_strike', 0) < 0),
-        'left_leg_strikes': sum(1 for fr in frames if fr['features'].get('left_leg_strike')),
-        'right_leg_strikes': sum(1 for fr in frames if fr['features'].get('right_leg_strike')),
+        'moves_detected': move_counts,
+        'pct_soundwave_rise': round(100.0 * sum(1 for fr in frames if fr['features'].get('soundwave_rise', 0.0) >= 0.20) / len(frames), 1),
+        'pct_arms_crossed': round(100.0 * sum(1 for fr in frames if fr['features'].get('arms_crossed')) / len(frames), 1),
+        'pct_body_frozen': round(100.0 * sum(1 for fr in frames if fr['features'].get('body_frozen')) / len(frames), 1),
+        'pct_squat_dive': round(100.0 * sum(1 for fr in frames if fr['features'].get('squat_depth', 0.0) >= 0.42) / len(frames), 1),
+        'pct_side_step': round(100.0 * sum(1 for fr in frames if fr['features'].get('side_step_groove')) / len(frames), 1),
         'pct_legs_visible': round(100.0 * sum(1 for fr in frames if fr['features'].get('legs_visible')) / len(frames), 1),
-        'head_nods': sum(1 for fr in frames if fr['features'].get('head_nod')),
         'shoulder_drops': sum(1 for fr in frames if fr['features'].get('shoulder_drop')),
         'pct_head_harmony': round(100.0 * sum(1 for fr in frames if fr['composer'].get('head_harmony')) / len(frames), 1),
-        'pct_shoulder_groove': round(100.0 * sum(1 for fr in frames if fr['composer'].get('shoulder_groove')) / len(frames), 1),
         'pct_bpm_synced': round(100.0 * sum(1 for fr in frames if fr['composer'].get('bpm_synced')) / len(frames), 1),
     }
 
@@ -261,7 +265,7 @@ def analyze_session(jsonl_path: Path, wav_path: Path | None = None) -> dict:
         findings.append('`head_tilt` se quedó debajo del umbral 0.28 para `HEAD HARMONY` (conviene aumentar sensibilidad).')
     if triggers['pct_legs_visible'] < 20.0:
         findings.append(
-            f'Piernas poco visibles en cámara ({triggers["pct_legs_visible"]}%): aléjate un poco o inclina la cámara para incluir rodillas/tobillos y activar kick/snare con los pies.'
+            f'Piernas poco visibles en cámara ({triggers["pct_legs_visible"]}%): aléjate un poco para sumar postura/stance y ritmo corporal de piernas.'
         )
     if triggers['pct_bpm_synced'] == 0.0 and feat_ranges['energy']['max'] > 0.35:
         findings.append('El BPM nunca enganchó con el cuerpo (`pct_bpm_synced = 0%`): revisa `body_bpm_confidence` máx '

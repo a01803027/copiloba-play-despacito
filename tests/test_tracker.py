@@ -27,7 +27,6 @@ class TrackerTests(unittest.TestCase):
                     ok, frame = cap.read()
                     if not ok:
                         break
-                    # Also verify duplicate/non-monotonic timestamp handling.
                     pts = tracker.process(frame, idx / 30.0 if idx % 2 else 0.0)
                     if pts is not None:
                         self.assertEqual(len(pts), 33)

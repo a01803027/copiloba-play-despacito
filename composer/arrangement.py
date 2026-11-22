@@ -1,9 +1,10 @@
-"""Structured musical arrangement engine:
-- 4-bar Call & Response phrase cycle (A -> A' -> B -> A'' + Bar-4 Fill)
-- Musical sections (INTRO / GROOVE / CHORUS / BUILDUP / DROP) driven by energy & shoulders
-- Human chord strumming (micro-arpeggiation)
-- Diatonic phrase contour transposition following right arm height
+"""Studio musical arrangement engine:
+- Cohesive 4-bar Call & Response phrases (A -> A' -> B -> A'') in a STABLE singable register
+- Hysteretic 3-zone octave/voicing expression (prevents frantic 3-octave pitch scrambling!)
+- Clean musical sections (INTRO / GROOVE / CHORUS / BUILDUP / DROP) with DJ Choke & Hand Burst support
 """
+from __future__ import annotations
+
 from typing import Sequence
 from .features import Features, clamp
 from .procedural import degree_to_midi
@@ -13,7 +14,7 @@ RATE = 48_000
 
 
 class SectionController:
-    """Manages musical sections smoothly with hysteresis + shoulder Build-up/Drop."""
+    """Manages musical sections smoothly with hysteresis, hand bursts, and shoulder Build-up/Drop."""
 
     def __init__(self):
         self.section = 'INTRO'
@@ -23,35 +24,35 @@ class SectionController:
         self.section = 'INTRO'
         self.drop_until = -1e9
 
-    def update(self, live_energy: float, features: Features, seconds: float) -> str:
-        # Shrugging shoulders up clearly (>= 0.62) engages musical BUILD-UP tension.
-        if features.shoulder_lift >= 0.62:
+    def update(self, live_energy: float, features: Features, seconds: float, drop_trigger: bool = False) -> str:
+        # Deliberate shoulder shrug enters clean BUILD-UP tension.
+        if features.shoulder_lift >= 0.65:
             self.section = 'BUILDUP'
             return self.section
 
-        # Releasing shrugged shoulders triggers an energetic DROP!
-        if features.shoulder_drop:
+        # Releasing DJ Breakdown toggle or shoulder drop triggers clean DROP!
+        if drop_trigger or features.shoulder_drop:
             self.drop_until = seconds + 4.0
             self.section = 'DROP'
             return self.section
 
-        if seconds < self.drop_until and live_energy >= 0.14:
+        if seconds < self.drop_until and live_energy >= 0.12:
             self.section = 'DROP'
             return self.section
 
         # Smooth hysteresis between INTRO, GROOVE, and CHORUS based on body energy.
         if self.section == 'INTRO':
-            if live_energy >= 0.20:
+            if live_energy >= 0.18:
                 self.section = 'GROOVE'
         elif self.section == 'GROOVE':
-            if live_energy < 0.14:
+            if live_energy < 0.12:
                 self.section = 'INTRO'
-            elif live_energy >= 0.50:
+            elif live_energy >= 0.48:
                 self.section = 'CHORUS'
-        else:  # CHORUS, BUILDUP, DROP
-            if live_energy < 0.14:
+        else:
+            if live_energy < 0.12:
                 self.section = 'INTRO'
-            elif live_energy < 0.40:
+            elif live_energy < 0.36:
                 self.section = 'GROOVE'
             else:
                 self.section = 'CHORUS'
@@ -59,12 +60,29 @@ class SectionController:
 
 
 class PhraseSequencer:
-    """Executes A - A' - B - A'' phrases coherently over 4-bar cycles."""
+    """Executes memorable A - A' - B - A'' phrases in a cohesive, singable register."""
 
     @staticmethod
     def active_motif(style: StyleBlueprint, bar_in_cycle: int) -> tuple[PhraseNote, ...]:
-        # Bar 0 = A, Bar 1 = A' (repetition builds hook!), Bar 2 = B (response), Bar 3 = A'' (resolution).
         return style.motif_b if bar_in_cycle == 2 else style.motif_a
+
+    @staticmethod
+    def register_shift(right_height: float, prev_zone: int = 0) -> int:
+        """Hysteretic 3-zone musical register (-1 = low octave, 0 = core register, +1 = high octave).
+
+        Avoids frantic frame-by-frame pitch teleportation while keeping right-arm height
+        cleanly musical and expressive!
+        """
+        h = clamp(right_height)
+        if prev_zone == -1:
+            return 0 if h > 0.32 else -1
+        if prev_zone == 1:
+            return 0 if h < 0.68 else 1
+        if h < 0.24:
+            return -1
+        if h > 0.76:
+            return 1
+        return 0
 
     @staticmethod
     def notes_at_slot(
@@ -75,6 +93,7 @@ class PhraseSequencer:
         right_height: float,
         section: str,
         head_tilt: float,
+        register_zone: int | None = None,
     ) -> list[tuple[int, int, float]]:
         """Return list of (midi_note, length_steps, velocity_scale) for this 16th-note slot."""
         if section == 'INTRO' and right_height < 0.20:
@@ -85,30 +104,29 @@ class PhraseSequencer:
         if not matching:
             return []
 
-        # In INTRO, play only anchor notes (first half of motif) gently so pad breathes.
         if section == 'INTRO' and slot >= 8:
             return []
 
-        # Continuous right arm height transposes the memorable phrase diatonically (-3..+7 degrees).
-        # Raising the arm lifts the phrase note-by-note; lowering brings it smoothly down.
-        reg_shift = int(round((clamp(right_height) - 0.30) * 10.0))
-        # Bar 3 (A'') resolves slightly calmer on the final note.
-        bar_nudge = 1 if (bar_in_cycle == 2 and section in ('CHORUS', 'DROP')) else 0
+        zone = PhraseSequencer.register_shift(right_height) if register_zone is None else register_zone
+        # Shift cleanly by full musical octaves (+/- scale length = +/- 12 semitones) so the motif
+        # ALWAYS sounds intentional and singable instead of scrambling harmony!
+        octave_deg = zone * len(style.scale)
+        # Subtle expressive velocity lift with continuous right-arm height.
+        expr_vel = 0.76 + 0.24 * clamp(right_height)
 
         out: list[tuple[int, int, float]] = []
         for note_spec in matching:
-            deg = chord_degree + note_spec.degree_offset + reg_shift + bar_nudge
-            midi = max(48, min(96, degree_to_midi(deg, style.base_midi, style.scale)))
-            vel_scale = 0.72 if section == 'INTRO' else (1.0 if section in ('CHORUS', 'DROP') else 0.88)
+            deg = chord_degree + note_spec.degree_offset + octave_deg
+            midi = max(52, min(88, degree_to_midi(deg, style.base_midi, style.scale)))
+            vel_scale = (0.70 if section == 'INTRO' else (0.96 if section in ('CHORUS', 'DROP') else 0.85)) * expr_vel
             out.append((midi, note_spec.length_steps, vel_scale))
 
-            # Unmistakable HEAD TILT effect: tilting head adds a lush parallel harmony voice!
-            # Tilt right (> +0.28) -> +3rd above (+2 scale degrees); tilt left (< -0.28) -> +5th (+4 degrees).
+            # Head tilt adds a lush parallel harmony voice (+3rd right, +5th left).
             if abs(head_tilt) > 0.28:
                 harm_interval = 2 if head_tilt > 0 else 4
-                harm_midi = max(52, min(96, degree_to_midi(deg + harm_interval, style.base_midi, style.scale)))
+                harm_midi = max(55, min(91, degree_to_midi(deg + harm_interval, style.base_midi, style.scale)))
                 if harm_midi != midi:
-                    out.append((harm_midi, note_spec.length_steps, vel_scale * 0.78))
+                    out.append((harm_midi, note_spec.length_steps, vel_scale * 0.75))
         return out
 
 
@@ -124,7 +142,6 @@ def strum_chord_schedule(
     scheduled = []
     for idx, note in enumerate(notes):
         on_frame = target_frame + idx * step_frames
-        # Slight natural accent on root and top melody tone of the voicing.
         v_mod = 1.0 if idx in (0, len(notes) - 1) else 0.90
-        scheduled.append((note, clamp(velocity * v_mod, 0.15, 0.95), on_frame, on_frame + duration_frames))
+        scheduled.append((note, clamp(velocity * v_mod, 0.15, 0.92), on_frame, on_frame + duration_frames))
     return scheduled

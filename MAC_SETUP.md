@@ -204,7 +204,7 @@ opcional de tempo. Si se combina con stems, requiere un build con Rubber Band
 activado. La demo de tempo fijo funciona con el build indicado arriba.
 
 ```sh
-python -m composer.performance --mode video --video brazo.mp4 --offline-audio --record artifacts/instrumento-video.wav --no-window
+python -m composer.app --mode video --video brazo.mp4 --launch-engine --offline-audio --record artifacts/instrumento-video.wav --no-window
 ```
 
 Reproduce el vídeo de referencia a su cadencia, ejecuta el IPC y guarda un WAV

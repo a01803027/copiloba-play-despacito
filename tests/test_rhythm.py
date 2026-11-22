@@ -32,12 +32,11 @@ def _base_pose(
 
 class RhythmAndBodyFeaturesTests(unittest.TestCase):
     def test_tempo_tracker_locks_at_variable_fps_hip_and_head(self):
-        # 105 BPM hip bounce sampled at 24 FPS (variable-FPS webcam scenario).
         tracker = MultiSourceTempoTracker(initial_bpm=90.0)
         target_bpm = 105.0
         freq = target_bpm / 60.0
         bpm, conf = 90.0, 0.0
-        for i in range(96):  # 4 seconds at 24 FPS
+        for i in range(96):
             t = i / 24.0
             hip_y = 0.65 + 0.06 * math.sin(2.0 * math.pi * freq * t)
             bpm, conf = tracker.update(t, hip_y=hip_y, head_y=0.4, arm_speed=0.0, bpm_min=70.0, bpm_max=150.0)
@@ -45,7 +44,6 @@ class RhythmAndBodyFeaturesTests(unittest.TestCase):
         self.assertAlmostEqual(bpm, target_bpm, delta=4.0)
         self.assertEqual(tracker.source, 'hip')
 
-        # 124 BPM head nodding at 30 FPS with static hips.
         tracker2 = MultiSourceTempoTracker(initial_bpm=100.0)
         target_bpm2 = 124.0
         freq2 = target_bpm2 / 60.0
@@ -57,35 +55,9 @@ class RhythmAndBodyFeaturesTests(unittest.TestCase):
         self.assertAlmostEqual(bpm, target_bpm2, delta=4.0)
         self.assertEqual(tracker2.source, 'head')
 
-    def test_fast_arm_up_and_down_strikes_at_25fps(self):
-        ext = FeatureExtractor()
-        # Baseline stillness for 5 frames at 25 FPS.
-        for i in range(5):
-            ext.update(_base_pose(r_wr=(0.68, 0.65, 0.0)), i / 25.0)
-
-        # Rapid upward raise of right arm over 4 frames (160 ms).
-        up_strikes = []
-        for k, y in enumerate((0.50, 0.25, 0.05, 0.05, 0.05), start=5):
-            f = ext.update(_base_pose(r_wr=(0.68, y, 0.0)), k / 25.0)
-            if f.right_strike != 0:
-                up_strikes.append((f.right_strike, f.right_strike_strength))
-        self.assertTrue(any(d == 1 for d, _ in up_strikes), f'Expected upward strike, got {up_strikes}')
-
-        # Wait past 420ms cooldown (12 frames = 480 ms) then rapid downward slash.
-        for i in range(10, 22):
-            ext.update(_base_pose(r_wr=(0.68, 0.05, 0.0)), i / 25.0)
-
-        down_strikes = []
-        for k, y in enumerate((0.25, 0.55, 0.78, 0.78, 0.78), start=22):
-            f = ext.update(_base_pose(r_wr=(0.68, y, 0.0)), k / 25.0)
-            if f.right_strike != 0:
-                down_strikes.append((f.right_strike, f.right_strike_strength))
-        self.assertTrue(any(d == -1 for d, _ in down_strikes), f'Expected downward strike, got {down_strikes}')
-
     def test_head_torso_and_hip_features_respond(self):
         ext = FeatureExtractor()
         neutral = ext.update(_base_pose(), 0.0)
-        # Head lifted + tilted right, torso leaning right + twisted, hip swayed right & crouched realistically.
         pose = _base_pose(
             nose=(0.64, 0.16, 0.0),
             l_ear=(0.59, 0.14, 0.0),
@@ -105,27 +77,23 @@ class RhythmAndBodyFeaturesTests(unittest.TestCase):
         self.assertGreater(expressive.hip_sway, 0.1)
         self.assertLess(expressive.body_level, neutral.body_level)
 
-    def test_shoulder_shrug_drop_bounce_and_head_nod(self):
+    def test_shoulder_shrug_drop_bounce_and_look_down_rejection(self):
         ext = FeatureExtractor()
-        # Relaxed baseline for 10 frames.
         for i in range(10):
             ext.update(_base_pose(), i / 30.0)
 
-        # Shrug shoulders up toward nose (l_sh/r_sh rise from 0.35 -> 0.28).
         max_lift = 0.0
         for i in range(10, 20):
             f = ext.update(_base_pose(l_sh=(0.40, 0.28, 0.0), r_sh=(0.60, 0.28, 0.0)), i / 30.0)
             max_lift = max(max_lift, f.shoulder_lift)
         self.assertGreater(max_lift, 0.65)
 
-        # Release shoulders back down -> must fire discrete shoulder_drop event!
         dropped = False
         for i in range(20, 30):
             f = ext.update(_base_pose(l_sh=(0.40, 0.35, 0.0), r_sh=(0.60, 0.35, 0.0)), i / 30.0)
             dropped |= f.shoulder_drop
         self.assertTrue(dropped, 'Expected shoulder_drop on shrug release')
 
-        # Alternating shoulder bobbing produces high shoulder_bounce and tilt.
         bounces = []
         for i in range(30, 50):
             dy = 0.04 * math.sin(i * 0.8)
@@ -133,29 +101,17 @@ class RhythmAndBodyFeaturesTests(unittest.TestCase):
             bounces.append(f.shoulder_bounce)
         self.assertGreater(max(bounces), 0.35)
 
-        # Crisp downward head nod triggers head_nod event.
-        nodded = False
-        for k, ny in enumerate((0.20, 0.26, 0.34, 0.34, 0.26, 0.20), start=50):
-            f = ext.update(_base_pose(nose=(0.50, ny, 0.0)), k / 30.0)
-            nodded |= f.head_nod
-        self.assertTrue(nodded, 'Expected head_nod on downward nod')
-
-        # Raising arms overhead must NOT trigger a false shoulder_lift shrug.
-        for i in range(60, 72):
-            f = ext.update(
-                _base_pose(l_sh=(0.40, 0.30, 0.0), r_sh=(0.60, 0.30, 0.0), l_wr=(0.35, 0.05, 0.0), r_wr=(0.65, 0.05, 0.0)),
-                i / 30.0,
-            )
+        for i in range(50, 62):
+            f = ext.update(_base_pose(l_sh=(0.40, 0.30, 0.0), r_sh=(0.60, 0.30, 0.0), l_wr=(0.35, 0.05, 0.0), r_wr=(0.65, 0.05, 0.0)), i / 30.0)
         self.assertLess(f.shoulder_lift, 0.25)
 
-        # Looking down (nose drops below ears while shoulders stay put) must NOT trigger a false shrug!
-        for i in range(72, 84):
+        for i in range(62, 74):
             f = ext.update(_base_pose(nose=(0.50, 0.28, 0.0), l_ear=(0.47, 0.20, 0.0), r_ear=(0.53, 0.20, 0.0)), i / 30.0)
         self.assertLess(f.shoulder_lift, 0.25)
 
-    def test_leg_tracking_knee_fallback_stomps_and_legs_bpm(self):
+    def test_leg_continuous_macros_knee_fallback_and_legs_bpm(self):
         ext = FeatureExtractor()
-        # Only knees (25, 26) visible (ankles 27, 28 cropped off-screen with vis=0.0).
+
         def pose_with_knees(lk, rk, vis_ankles=False):
             pts = _base_pose()
             pts[25] = (*lk, 0.95)
@@ -165,41 +121,26 @@ class RhythmAndBodyFeaturesTests(unittest.TestCase):
                 pts[28] = (rk[0], rk[1] + 0.18, 0.0, 0.95)
             return pts
 
-        # Planted baseline for 6 frames.
         for i in range(6):
             f = ext.update(pose_with_knees((0.44, 0.85, 0.0), (0.56, 0.85, 0.0)), i / 30.0)
         self.assertTrue(f.legs_visible)
         self.assertEqual(f.legs_source, 'knees')
 
-        # Sharp right knee lift + stomp down must trigger right_leg_strike & raise right_leg_lift.
-        stomp_seen = False
         max_lift = 0.0
-        for k, ry in enumerate((0.80, 0.72, 0.65, 0.74, 0.85, 0.85), start=6):
+        for k, ry in enumerate((0.80, 0.72, 0.65, 0.74, 0.85), start=6):
             f = ext.update(pose_with_knees((0.44, 0.85, 0.0), (0.56, ry, 0.0)), k / 30.0)
-            stomp_seen |= f.right_leg_strike
             max_lift = max(max_lift, f.right_leg_lift)
         self.assertGreater(max_lift, 0.45)
-        self.assertTrue(stomp_seen, 'Expected right_leg_strike from sharp knee lift/stomp')
 
-        # Wide stance increases stance_width and ankles take priority when visible.
-        f_wide = ext.update(pose_with_knees((0.30, 0.85, 0.0), (0.70, 0.85, 0.0), vis_ankles=True), 13 / 30.0)
+        f_wide = ext.update(pose_with_knees((0.30, 0.85, 0.0), (0.70, 0.85, 0.0), vis_ankles=True), 12 / 30.0)
         self.assertEqual(f_wide.legs_source, 'ankles')
         self.assertGreater(f_wide.stance_width, 0.6)
 
-        # Standing still with tiny knee jitter must NOT trigger false leg strikes or high leg_energy!
-        jitter_strikes = 0
-        for i in range(14, 28):
-            jy = 0.85 + 0.008 * math.sin(i * 1.9)
-            fj = ext.update(pose_with_knees((0.44, jy, 0.0), (0.56, jy, 0.0)), i / 30.0)
-            jitter_strikes += int(fj.left_leg_strike) + int(fj.right_leg_strike)
-        self.assertEqual(jitter_strikes, 0)
-
-        # Periodic 120 BPM stepping locks the 'legs' BPM tracker channel.
         tracker = MultiSourceTempoTracker(initial_bpm=100.0)
         bpm, conf = 100.0, 0.0
         for i in range(120):
             t = i / 30.0
-            pulse = max(0.0, math.sin(2.0 * math.pi * 2.0 * t))  # 2 Hz = 120 BPM
+            pulse = max(0.0, math.sin(2.0 * math.pi * 2.0 * t))
             bpm, conf = tracker.update(t, hip_y=0.65, head_y=0.4, arm_speed=0.0, leg_pulse=pulse, bpm_min=80.0, bpm_max=150.0)
         self.assertGreater(conf, 0.55)
         self.assertAlmostEqual(bpm, 120.0, delta=4.0)

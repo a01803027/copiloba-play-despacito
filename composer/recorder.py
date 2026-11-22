@@ -97,6 +97,8 @@ class SessionRecorder:
                 'bpm_source': getattr(composer, 'bpm_sync_source', 'none'),
                 'head_harmony': bool(getattr(composer, 'head_harmony_active', False)),
                 'shoulder_groove': bool(getattr(composer, 'shoulder_groove_active', False)),
+                'beat_active': bool(getattr(composer, 'beat_active', True)),
+                'dj_choke': bool(getattr(composer, 'dj_choke_active', False)),
             },
             'controls': _round_value(controls),
             'events': [
