@@ -1,0 +1,20 @@
+[Unit]
+Description=CV-DAW miniaudio ALSA engine (Modules 4 and 5)
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=cvdaw
+Group=audio
+WorkingDirectory=/opt/cvdaw
+ExecStart=/opt/cvdaw/realtime/build/cv-daw-engine
+# Main/control/stem work inherits core 0. The actual audio pthread pins itself to 1.
+CPUAffinity=0
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+Restart=no
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

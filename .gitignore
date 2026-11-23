@@ -6,3 +6,13 @@ __pycache__/
 .env
 djvision/
 .vscode/
+.idea/
+.DS_Store
+artifacts/diag_*
+artifacts/verify_*
+
+/build*/
+/realtime/build*/
+
+.venv-mac/
+artifacts/

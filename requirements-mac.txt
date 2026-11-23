@@ -1,0 +1,6 @@
+# Python 3.14+, macOS Apple Silicon; MediaPipe Tasks API (PoseLandmarker / HandLandmarker).
+numpy==2.5.4
+opencv-contrib-python==5.0.0.93
+mediapipe==1.2.3
+pygame-ce==2.5.8
+sounddevice==0.5.6
