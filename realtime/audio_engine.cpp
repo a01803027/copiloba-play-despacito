@@ -26,6 +26,7 @@
 
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -261,6 +262,7 @@ struct Runtime {
     std::atomic<int> startup_error{0};
     std::atomic<int> backend_error{0};
     bool profile = false;
+    bool strict_rt = false;
     uint64_t calls = 0;
     uint64_t sum_ticks = 0;
     uint64_t max_ticks = 0;
@@ -303,7 +305,7 @@ ma_result start_backend(ma_device* device) {
     auto& r = *static_cast<Runtime*>(device->pUserData);
     int error = initialize_audio_thread();
     r.startup_error.store(error, std::memory_order_release);
-    if (error) {
+    if (error && r.strict_rt) {
         return MA_ERROR;
     }
     return r.original_start ? r.original_start(device) : MA_SUCCESS;
@@ -363,16 +365,21 @@ int main(int argc, char** argv) {
 
         const char* render_path = nullptr;
         const char* live_record_path = nullptr;
+        const char* alsa_device = nullptr;
         bool demo = false;
         bool profile = false;
         bool performance = false;
         bool stretch_stems = false;
+        bool strict_alsa = false;
+        bool strict_rt = false;
         double seconds = 0.0;
         const char* sample_paths[4]{};
         const char* stem_paths[4]{};
         double source_bpm = 120.0;
         double initial_bpm = 120.0;
         unsigned offline_blocks = 0;
+        unsigned period_frames = block_frames;
+        unsigned alsa_periods = 2;
 
         for (int i = 1; i < argc; ++i) {
             std::string option = argv[i];
@@ -380,6 +387,22 @@ int main(int argc, char** argv) {
                 render_path = argv[++i];
             } else if (option == "--live-record" && i + 1 < argc) {
                 live_record_path = argv[++i];
+            } else if (option == "--alsa-device" && i + 1 < argc) {
+                alsa_device = argv[++i];
+            } else if (option == "--period-frames" && i + 1 < argc) {
+                period_frames = unsigned(std::stoul(argv[++i]));
+                if (period_frames < block_frames || period_frames > 1024 || (period_frames % block_frames) != 0) {
+                    throw std::runtime_error("period-frames must be a multiple of 128 in [128..1024]");
+                }
+            } else if (option == "--alsa-periods" && i + 1 < argc) {
+                alsa_periods = unsigned(std::stoul(argv[++i]));
+                if (alsa_periods < 2 || alsa_periods > 8) {
+                    throw std::runtime_error("alsa-periods must be in [2..8]");
+                }
+            } else if (option == "--strict-alsa") {
+                strict_alsa = true;
+            } else if (option == "--strict-rt") {
+                strict_rt = true;
             } else if (option == "--seconds" && i + 1 < argc) {
                 seconds = std::stod(argv[++i]);
                 if (!(seconds > 0.0 && seconds <= 3600.0)) {
@@ -539,6 +562,7 @@ int main(int argc, char** argv) {
         runtime.engine = engine.get();
         runtime.shared = &shared;
         runtime.profile = profile;
+        runtime.strict_rt = strict_rt;
 
         std::unique_ptr<LiveTap> live_tap;
         if (live_record_path) {
@@ -551,19 +575,26 @@ int main(int argc, char** argv) {
         auto config = ma_device_config_init(ma_device_type_playback);
 #ifdef __linux__
         ma_device_id id{};
-        std::strcpy(id.alsa, "hw:0,0");
+        const char* dev_name = alsa_device ? alsa_device : (strict_alsa ? "hw:0,0" : "default");
+        if (std::strlen(dev_name) >= sizeof(id.alsa)) {
+            throw std::runtime_error("ALSA device name too long");
+        }
+        std::strcpy(id.alsa, dev_name);
         config.playback.pDeviceID = &id;
-        config.playback.shareMode = ma_share_mode_exclusive;
-        config.alsa.noMMap = MA_TRUE;
-        config.alsa.noAutoFormat = MA_TRUE;
-        config.alsa.noAutoChannels = MA_TRUE;
-        config.alsa.noAutoResample = MA_TRUE;
+        config.playback.shareMode = strict_alsa ? ma_share_mode_exclusive : ma_share_mode_shared;
+        config.alsa.noMMap = strict_alsa ? MA_TRUE : MA_FALSE;
+        config.alsa.noAutoFormat = strict_alsa ? MA_TRUE : MA_FALSE;
+        config.alsa.noAutoChannels = strict_alsa ? MA_TRUE : MA_FALSE;
+        config.alsa.noAutoResample = strict_alsa ? MA_TRUE : MA_FALSE;
+#else
+        (void)alsa_device;
+        (void)strict_alsa;
 #endif
         config.playback.format = ma_format_f32;
         config.playback.channels = 2;
         config.sampleRate = sample_rate;
-        config.periodSizeInFrames = block_frames;
-        config.periods = 2;
+        config.periodSizeInFrames = period_frames;
+        config.periods = alsa_periods;
         config.performanceProfile = ma_performance_profile_low_latency;
         config.dataCallback = data_callback;
         config.pUserData = &runtime;
@@ -579,16 +610,19 @@ int main(int argc, char** argv) {
 
 #ifdef __linux__
         const auto& playback = device.value.playback;
-        if (playback.internalSampleRate != sample_rate
-            || playback.internalChannels != 2
-            || playback.internalPeriodSizeInFrames != block_frames
-            || playback.internalPeriods != 2) {
+        if (strict_alsa
+            && (playback.internalSampleRate != sample_rate
+                || playback.internalChannels != 2
+                || playback.internalPeriodSizeInFrames != period_frames
+                || playback.internalPeriods != alsa_periods)) {
             throw std::runtime_error("ALSA negotiated incompatible geometry");
         }
         runtime.original_start = context.value.callbacks.onDeviceStart;
         context.value.callbacks.onDeviceStart = start_backend;
         active_runtime = &runtime;
-        context.value.alsa.snd_pcm_recover = reinterpret_cast<ma_proc>(fail_recovery);
+        if (strict_alsa) {
+            context.value.alsa.snd_pcm_recover = reinterpret_cast<ma_proc>(fail_recovery);
+        }
 #endif
 
         signal(SIGINT, stop);
@@ -609,9 +643,14 @@ int main(int argc, char** argv) {
         Unlock memory;
         int error = lock_process_memory();
         if (error) {
-            throw std::runtime_error(std::string("mlockall: ") + std::strerror(error));
+            if (strict_rt) {
+                throw std::runtime_error(std::string("mlockall: ") + std::strerror(error));
+            }
+            std::cerr << "warning: mlockall skipped (" << std::strerror(error)
+                      << "); run with RT limits or --strict-rt for qualification\n";
+        } else {
+            memory.locked = true;
         }
-        memory.locked = true;
 #endif
 
         ma_result start_result = ma_device_start(&device.value);
@@ -621,10 +660,17 @@ int main(int argc, char** argv) {
                 std::string("audio start: ") + (startup ? std::strerror(startup) : ma_result_description(start_result))
             );
         }
+#ifdef __linux__
+        if (int rt_warn = runtime.startup_error.load(); rt_warn != 0 && !strict_rt) {
+            std::cerr << "warning: SCHED_FIFO/affinity skipped (" << std::strerror(rt_warn)
+                      << "); audio running in standard priority\n";
+        }
+#endif
 
         std::cout << "audio-ready backend=" << (backend == ma_backend_coreaudio ? "CoreAudio" : "ALSA")
                   << " rate=" << device.value.sampleRate
-                  << " callback_frames=128" << std::endl;
+                  << " callback_frames=" << period_frames
+                  << " voices_per_limb=" << voices_per_limb << std::endl;
         shared.header.ready.store(1, std::memory_order_release);
 
         auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(int64_t(seconds * 1000));

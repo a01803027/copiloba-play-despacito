@@ -15,7 +15,10 @@ namespace cv_daw {
 
 inline constexpr uint32_t sample_rate = 48000;
 inline constexpr uint32_t block_frames = 128;
-inline constexpr uint32_t voices_per_limb = 12;
+#ifndef CV_DAW_VOICES_PER_LIMB
+#define CV_DAW_VOICES_PER_LIMB 12
+#endif
+inline constexpr uint32_t voices_per_limb = CV_DAW_VOICES_PER_LIMB;
 
 inline float bounded(float value, float lo, float hi, float fallback) noexcept {
     return finite(value) ? std::clamp(value, lo, hi) : fallback;
@@ -350,17 +353,17 @@ struct Voice {
 
         // Configure expressive studio envelopes & per-voice filter envelopes (presets 0..7 unchanged).
         if (is_riser) {
-            // Dedicated Cinematic Soundwave Riser (triggered by MIDI 120 on Double-Arm Rise).
-            // Smooth 1.8s upward pitch & resonant filter sweep with wide stereo air shimmer.
-            envelope.configure(180.f, 1500.f, 0.85f, 450.f);
-            max_age = uint32_t(2.4f * sample_rate);
+            // Warm Atmospheric Shimmer Swell (triggered by MIDI 120 on Double-Arm Rise).
+            // Lush harmonic fifth + octave sine/triangle choir bloom + silky filtered breath (zero pitch siren!).
+            envelope.configure(260.f, 1600.f, 0.72f, 540.f);
+            max_age = uint32_t(2.6f * sample_rate);
             increment = tables.increments[48];
             band = uint8_t(tables.band_for(increment));
             use_vfilt = true;
-            filt_base = 360.f;
-            filt_depth = 8800.f;
+            filt_base = 420.f;
+            filt_depth = 2200.f;
             filt_decay = 0.9999f;
-            filt_res = 2.25f;
+            filt_res = 0.85f;
             filt_env = 0.0f;
             mod_env = 0.0f;
             phase3 = 0.0f;
@@ -495,33 +498,36 @@ struct Voice {
                 active = false;
             }
         } else if (preset_id >= 8 && note == 120 && use_vfilt) {
-            // Studio Rising Soundwave: lush 3-voice stereo pitch glide (+1 octave over ~1.75s)
-            // + band-limited warm air swell.
-            float progress = std::min(1.f, float(age) / (1.75f * float(sample_rate)));
-            filt_env = progress * progress;          // exponential upward filter sweep 360 Hz -> 9160 Hz
-            float glide = 1.f + progress * progress; // smooth +1 octave upward pitch rise
-            float inc = std::min(increment * glide * bend_ratio, 0.45f);
+            // Warm Studio Atmospheric Shimmer Swell: chordal root + fifth + octave bloom
+            // with gentle velvety breath (no harsh sawtooth siren or screaming resonance).
+            float progress = std::min(1.f, float(age) / (1.80f * float(sample_rate)));
+            filt_env = progress * (2.f - progress);  // gentle ease-out filter bloom 420 Hz -> 2620 Hz
+            float inc = std::min(increment * bend_ratio, 0.45f);
             unsigned b = tables.band_for(inc);
 
             noise ^= noise << 13;
             noise ^= noise >> 17;
             noise ^= noise << 5;
             float w = float(noise >> 8) * (2.f / 16777216.f) - 1.f;
-            phase3 += 0.28f * (w - phase3);  // warm band-limited air shimmer (zero harsh hiss)
+            // 2-pole warm breath filter (velvety air, zero harsh white hiss).
+            mod_env += 0.09f * (w - mod_env);
+            float breath = mod_env * (0.04f + 0.10f * progress);
 
-            float s_l = tables.oscillator(phase, b, false);
-            float s_r = tables.oscillator(phase2, b, false);
-            float air = phase3 * (0.15f + 0.35f * progress);
-            float swell = (0.25f + 0.75f * progress) * env * gain * 0.26f;
+            float root = tables.triangle(phase, b) * 0.50f;
+            float fifth = tables.oscillator(phase2, b, true) * (0.28f + 0.14f * progress);
+            float oct = tables.oscillator(phase3, b, true) * (0.16f + 0.18f * progress);
+            float swell = (0.30f + 0.70f * progress) * env * gain * 0.18f;
             out = {
-                (s_l * 0.80f + s_r * 0.20f + air) * swell,
-                (s_r * 0.80f + s_l * 0.20f - air * 0.85f) * swell,
+                (root + fifth * 0.85f + oct * 0.55f + breath) * swell,
+                (root + fifth * 0.55f + oct * 0.85f - breath * 0.75f) * swell,
             };
 
-            phase += std::min(inc * 0.993f, 0.45f);
+            phase += inc;
             if (phase >= 1.f) phase -= 1.f;
-            phase2 += std::min(inc * 1.007f, 0.45f);
+            phase2 += std::min(inc * 1.4983f, 0.45f);  // warm fifth with gentle chorus drift
             if (phase2 >= 1.f) phase2 -= 1.f;
+            phase3 += std::min(inc * 2.0035f, 0.45f);  // airy octave shimmer
+            if (phase3 >= 1.f) phase3 -= 1.f;
         } else if (preset_id >= 12 && note == 49 && !use_vfilt) {
             // Warm Studio Crash Cymbal: band-limited silky shimmer (no raw white-noise hiss).
             noise ^= noise << 13;

@@ -4,8 +4,16 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass
 import math
+from pathlib import Path
 from .filters import OneEuroFilter3D, clamp, elbow_bend
-from ..moves import BodyMoveRecognizer, MoveEvent
+from ..moves import (
+    BodyMoveRecognizer,
+    MoveEvent,
+    PoseFrame,
+    PoseSanitizer,
+    StreamingDtwMatcher,
+    TemporalMoveClassifier,
+)
 from ..rhythm import MultiSourceTempoTracker
 
 
@@ -60,6 +68,8 @@ class Features:
     side_step_groove: bool = False  # True during rhythmic side-step dance groove
     squat_depth: float = 0.0        # 0..1 continuous deep squat underwater filter dive
     active_move_label: str = ''
+    wiggle_suppressed: bool = False
+    glitch_joints: tuple[str, ...] = ()
     # Multi-source detected body rhythm
     body_bpm: float = 100.0
     body_bpm_confidence: float = 0.0
@@ -73,9 +83,29 @@ class Features:
 class FeatureExtractor:
     """Extracts smooth full-body macros + 11 biomechanical dance moves from 33-point MediaPipe Pose."""
 
-    def __init__(self, missing_grace_seconds: float = 0.30):
+    def __init__(
+        self,
+        missing_grace_seconds: float = 0.30,
+        tcn_model_path: Path | str | None = None,
+        dtw_dir: Path | str | None = None,
+    ):
         self.missing_grace_seconds = missing_grace_seconds
+        self.sanitizer = PoseSanitizer()
         self.move_recognizer = BodyMoveRecognizer()
+        self.tcn_classifier: TemporalMoveClassifier | None = (
+            TemporalMoveClassifier.from_npz(tcn_model_path)
+            if (tcn_model_path and Path(tcn_model_path).is_file())
+            else None
+        )
+        self.dtw_matcher: StreamingDtwMatcher | None = (
+            StreamingDtwMatcher.from_directory(Path(dtw_dir))
+            if (dtw_dir and Path(dtw_dir).is_dir())
+            else None
+        )
+        if self.dtw_matcher is not None and not self.dtw_matcher.labels:
+            self.dtw_matcher = None
+        self.last_pose_frame: PoseFrame | None = None
+        self.last_ml_probs: dict[str, float] = {}
         self._filters = [
             OneEuroFilter3D(min_cutoff=1.5, beta=0.35, d_cutoff=1.2),
             OneEuroFilter3D(min_cutoff=1.5, beta=0.35, d_cutoff=1.2),
@@ -130,7 +160,14 @@ class FeatureExtractor:
             flt.reset()
         self._nose_filter.reset()
         self._hip_filter.reset()
+        self.sanitizer.reset()
         self.move_recognizer.reset()
+        if self.tcn_classifier is not None:
+            self.tcn_classifier.reset()
+        if self.dtw_matcher is not None:
+            self.dtw_matcher.reset()
+        self.last_pose_frame = None
+        self.last_ml_probs = {}
         self._init_state()
         return Features(tracked=False)
 
@@ -225,6 +262,11 @@ class FeatureExtractor:
             dt = 1.0 / 30.0
         clamped_dt = min(dt, 0.2)
 
+        # Tier 0: Sanitize raw 33-point landmarks into a 2D-primary glitch-free PoseFrame.
+        pose_frame = self.sanitizer.process(points, timestamp, aspect=aspect)
+        self.last_pose_frame = pose_frame
+
+        # Use sanitized 2D (x, y) coordinates for limb tracking — eliminates 10x monocular Z hallucinations!
         vis = [len(points[i]) < 4 or points[i][3] >= 0.5 for i in range(33)]
         leg_indices, legs_source, (leg_ok_l, leg_ok_r) = self._select_legs(points)
         for side in (0, 1):
@@ -234,28 +276,54 @@ class FeatureExtractor:
                 self.leg_y_baseline[side] = None
                 self.prev_leg_indices[side] = leg_indices[side]
 
-        limb_indices = (15, 16, leg_indices[0], leg_indices[1])
-        raw_positions = [tuple((xyz[i][j] - hip[j]) / scale for j in range(3)) for i in limb_indices]
+        if pose_frame.tracked and pose_frame.joints_2d is not None:
+            j2d = pose_frame.joints_2d
+            l_leg_key = 'l_ankle' if legs_source == 'ankles' else 'l_knee'
+            r_leg_key = 'r_ankle' if legs_source == 'ankles' else 'r_knee'
+            # Convert sanitized UP=+y back to internal DOWN=+y with zero Z-noise.
+            raw_positions = [
+                (j2d['l_wrist'][0], -j2d['l_wrist'][1], 0.0),
+                (j2d['r_wrist'][0], -j2d['r_wrist'][1], 0.0),
+                (j2d[l_leg_key][0], -j2d[l_leg_key][1], 0.0),
+                (j2d[r_leg_key][0], -j2d[r_leg_key][1], 0.0),
+            ]
+        else:
+            limb_indices = (15, 16, leg_indices[0], leg_indices[1])
+            raw_positions = [((xyz[i][0] - hip[0]) / scale, (xyz[i][1] - hip[1]) / scale, 0.0) for i in limb_indices]
         active = [vis[15], vis[16], leg_ok_l, leg_ok_r]
         legs_visible = active[2] or active[3]
 
         positions = []
         velocities = []
-        for i, new in enumerate(raw_positions):
-            if not active[i]:
-                self._filters[i].reset()
-                filtered = self.previous[i] if self.previous is not None else (0.0, 0.0, 0.0)
-            elif self.previous is not None and self.previous_valid[i]:
-                filtered = self._filters[i].filter(new, clamped_dt)
-            else:
-                self._filters[i].reset()
-                filtered = self._filters[i].filter(new, clamped_dt)
-            positions.append(filtered)
-            velocities.append(
-                tuple((b - a) / dt for a, b in zip(self.previous[i], filtered))
-                if self.previous is not None and active[i] and self.previous_valid[i]
-                else (0.0, 0.0, 0.0)
-            )
+        if pose_frame.tracked and pose_frame.joints_2d is not None:
+            # Already 2D One-Euro filtered & anti-wiggle sanitized in PoseSanitizer — zero double-filtering lag!
+            for i, new in enumerate(raw_positions):
+                if not active[i]:
+                    filtered = self.previous[i] if self.previous is not None else (0.0, 0.0, 0.0)
+                else:
+                    filtered = new
+                positions.append(filtered)
+                velocities.append(
+                    tuple((b - a) / dt for a, b in zip(self.previous[i], filtered))
+                    if self.previous is not None and active[i] and self.previous_valid[i]
+                    else (0.0, 0.0, 0.0)
+                )
+        else:
+            for i, new in enumerate(raw_positions):
+                if not active[i]:
+                    self._filters[i].reset()
+                    filtered = self.previous[i] if self.previous is not None else (0.0, 0.0, 0.0)
+                elif self.previous is not None and self.previous_valid[i]:
+                    filtered = self._filters[i].filter(new, clamped_dt)
+                else:
+                    self._filters[i].reset()
+                    filtered = self._filters[i].filter(new, clamped_dt)
+                positions.append(filtered)
+                velocities.append(
+                    tuple((b - a) / dt for a, b in zip(self.previous[i], filtered))
+                    if self.previous is not None and active[i] and self.previous_valid[i]
+                    else (0.0, 0.0, 0.0)
+                )
 
         limb_speeds = [math.sqrt(sum(v * v for v in vel)) if ok else 0.0 for vel, ok in zip(velocities, active)]
         count = max(1, sum(active))
@@ -284,7 +352,13 @@ class FeatureExtractor:
             if self.leg_y_baseline[side] is None:
                 self.leg_y_baseline[side] = cur_y
             else:
-                b_tau = 0.55 if cur_y > self.leg_y_baseline[side] else 3.5
+                # Floor baseline adapts quickly downward (standing foot) and very slowly upward so lifts don't drag it.
+                if cur_y > self.leg_y_baseline[side]:
+                    b_tau = 0.45
+                elif (self.leg_y_baseline[side] - cur_y) < 0.08:
+                    b_tau = 3.5
+                else:
+                    b_tau = 14.0
                 self.leg_y_baseline[side] += (1.0 - math.exp(-clamped_dt / b_tau)) * (cur_y - self.leg_y_baseline[side])
             lift_scale = 0.40 if legs_source == 'knees' else 0.52
             leg_lifts[side] = clamp((self.leg_y_baseline[side] - cur_y) / lift_scale)
@@ -314,8 +388,11 @@ class FeatureExtractor:
         right_vy = -velocities[1][1] if active[1] else 0.0
         left_leg_vy = -velocities[2][1] if active[2] else 0.0
         right_leg_vy = -velocities[3][1] if active[3] else 0.0
-        left_bend = elbow_bend(xyz[11], xyz[13], xyz[15]) if (vis[11] and vis[13] and vis[15]) else 0.5
-        right_bend = elbow_bend(xyz[12], xyz[14], xyz[16]) if (vis[12] and vis[14] and vis[16]) else 0.5
+        if pose_frame.tracked:
+            left_bend, right_bend = pose_frame.elbow_bend_2d
+        else:
+            left_bend = elbow_bend(xyz[11], xyz[13], xyz[15]) if (vis[11] and vis[13] and vis[15]) else 0.5
+            right_bend = elbow_bend(xyz[12], xyz[14], xyz[16]) if (vis[12] and vis[14] and vis[16]) else 0.5
 
         # Head & shoulder continuous macros (cross-checked with ears so looking down never fakes a shrug).
         head_nod_vel = 0.0
@@ -437,11 +514,15 @@ class FeatureExtractor:
         self.history.append((timestamp, speed))
         periodicity = clamp(max(self._short_periodicity(timestamp), body_bpm_conf))
 
-        # Mirror-invariant forearm cross metric: positive when uncrossed, negative when crossed in an "X".
-        sh_sign = 1.0 if (xyz[11][0] >= xyz[12][0]) else -1.0
-        wrist_cross_metric = ((xyz[15][0] - xyz[16][0]) * sh_sign) / scale
-        # 6-joint arm chain heights relative to hip (up is +) for ARM_WAVE propagation detection.
-        chain_y = tuple((hip[1] - xyz[idx][1]) / scale for idx in (15, 13, 11, 12, 14, 16))
+        # Mirror-invariant forearm cross metric & sanitized 6-joint arm chain heights (up is +).
+        if pose_frame.tracked and pose_frame.joints_2d is not None:
+            j2d = pose_frame.joints_2d
+            wrist_cross_metric = pose_frame.wrist_cross_metric
+            chain_y = tuple(j2d[k][1] for k in ('l_wrist', 'l_elbow', 'l_shoulder', 'r_shoulder', 'r_elbow', 'r_wrist'))
+        else:
+            sh_sign = 1.0 if (xyz[11][0] >= xyz[12][0]) else -1.0
+            wrist_cross_metric = ((xyz[15][0] - xyz[16][0]) * sh_sign) / scale
+            chain_y = tuple((hip[1] - xyz[idx][1]) / scale for idx in (15, 13, 11, 12, 14, 16))
 
         move_snap = self.move_recognizer.update(
             timestamp=timestamp,
@@ -460,6 +541,10 @@ class FeatureExtractor:
             right_bend=right_bend,
             left_decel=per_limb_decel[0],
             right_decel=per_limb_decel[1],
+            left_reach=pose_frame.arm_reach[0] if pose_frame.tracked else 0.5,
+            right_reach=pose_frame.arm_reach[1] if pose_frame.tracked else 0.5,
+            left_reach_vel=pose_frame.arm_reach_vel[0] if pose_frame.tracked else 0.0,
+            right_reach_vel=pose_frame.arm_reach_vel[1] if pose_frame.tracked else 0.0,
             arms_active=(active[0], active[1]),
             wrist_cross_metric=wrist_cross_metric,
             chain_y=chain_y,
@@ -471,11 +556,39 @@ class FeatureExtractor:
             right_leg_lift=self.last_right_leg_lift,
             left_leg_vy=left_leg_vy,
             right_leg_vy=right_leg_vy,
+            glitch_joints=pose_frame.glitch_joints,
         )
+
+        # Optional Tier 2 Temporal Dance Recognizer (Keras TCN .npz and/or Few-Shot DTW templates).
+        all_moves = list(move_snap.events)
+        ml_probs: dict[str, float] = {}
+        if pose_frame.tracked:
+            t2_events: list[MoveEvent] = []
+            if self.tcn_classifier is not None:
+                t2_events.extend(self.tcn_classifier.update(timestamp, pose_frame.feature_vector))
+                ml_probs.update(self.tcn_classifier.last_probs)
+            if self.dtw_matcher is not None:
+                t2_events.extend(self.dtw_matcher.update(timestamp, pose_frame.feature_vector))
+                for k, v in self.dtw_matcher.last_scores.items():
+                    ml_probs.setdefault(f'dtw:{k}', v)
+            if t2_events:
+                all_moves = self.move_recognizer.arbiter.arbitrate(
+                    all_moves + t2_events,
+                    timestamp=timestamp,
+                    glitch_joints=pose_frame.glitch_joints,
+                    soundwave_rise=move_snap.soundwave_rise,
+                    arms_crossed=move_snap.arms_crossed,
+                )
+        self.last_ml_probs = ml_probs
 
         self.previous, self.velocity, self.last_time = positions, velocities, timestamp
         self.last_valid_time = timestamp
         self.previous_valid = active
+
+        active_move_label = move_snap.active_label
+        if not active_move_label and all_moves:
+            top = all_moves[0]
+            active_move_label = f'{top.kind} ({top.side.upper()})'
 
         result = Features(
             energy=self.energy,
@@ -516,13 +629,15 @@ class FeatureExtractor:
             right_leg_speed=limb_speeds[3],
             leg_energy=self.leg_energy,
             stance_width=self.last_stance_width,
-            moves=move_snap.events,
+            moves=tuple(all_moves),
             soundwave_rise=move_snap.soundwave_rise,
             arms_crossed=move_snap.arms_crossed,
             body_frozen=move_snap.body_frozen,
             side_step_groove=move_snap.side_step_groove,
             squat_depth=move_snap.squat_depth,
-            active_move_label=move_snap.active_label,
+            active_move_label=active_move_label,
+            wiggle_suppressed=pose_frame.wiggle_suppressed,
+            glitch_joints=pose_frame.glitch_joints,
             body_bpm=body_bpm,
             body_bpm_confidence=body_bpm_conf,
             body_bpm_source=self.tempo_tracker.source,
