@@ -18,7 +18,7 @@ from .moves import CANONICAL_JOINTS
 from .recorder import SessionRecorder
 from .styles import STYLE_ORDER
 from .ui import draw_hud, handle_window_key
-from .vision import AsyncPoseWorker, LatestCamera
+from .vision import AsyncPoseWorker, LatestCamera, create_pose_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -95,6 +95,10 @@ def _build_parser():
     p.add_argument('--video', type=Path)
     p.add_argument('--camera', type=int, default=None, help='Índice de cámara (por defecto webcam integrada)')
     p.add_argument('--gstreamer', type=str, default=None, help='Pipeline GStreamer opcional (e.g. STM32MP257F-DK CSI/V4L2)')
+    p.add_argument('--pose-backend', choices=('auto', 'mediapipe', 'stai-npu', 'movenet-tflite'), default='auto',
+                   help='Motor de pose: auto (MediaPipe en Mac, STAI NPU en STM32MP257F-DK)')
+    p.add_argument('--npu-model', type=Path, default=None,
+                   help='Ruta al modelo MoveNet INT8 (.nb/.tflite) para STM32 NPU o TFLite')
     p.add_argument('--pose-model', choices=('lite', 'full'), default='lite',
                    help='Modelo MediaPipe Pose (.task) — lite (30-60 FPS) por defecto')
     p.add_argument('--inference-width', type=int, default=320,
@@ -182,9 +186,13 @@ def main():
 
         if args.mode != 'mock':
             import cv2
-            from .tracker import PoseTracker
 
-            detector = PoseTracker(model=args.pose_model, inference_width=args.inference_width)
+            detector = create_pose_backend(
+                args.pose_backend,
+                pose_model=args.pose_model,
+                inference_width=args.inference_width,
+                npu_model=args.npu_model,
+            )
             if args.mode == 'camera':
                 if args.gstreamer:
                     print(f'Cámara GStreamer: {args.gstreamer}', flush=True)

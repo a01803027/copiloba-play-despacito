@@ -521,13 +521,55 @@ def train_and_export(args) -> dict:
         tflite_bytes = converter.convert()
         args.export_tflite.parent.mkdir(parents=True, exist_ok=True)
         args.export_tflite.write_bytes(tflite_bytes)
-        print(f'  Saved TFLite flatbuffer -> {args.export_tflite} ({len(tflite_bytes) / 1024.0:.1f} KB)')
+        print(f'  Saved FP32 TFLite       -> {args.export_tflite} ({len(tflite_bytes) / 1024.0:.1f} KB)')
+
+    int8_acc = None
+    if getattr(args, 'export_tflite_int8', None):
+        import tensorflow as tf
+
+        def rep_data():
+            n_cal = min(200, len(x_train_n))
+            for i in range(n_cal):
+                yield [x_train_n[i : i + 1].astype(np.float32)]
+
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.representative_dataset = rep_data
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+        converter.inference_input_type = tf.int8
+        converter.inference_output_type = tf.int8
+        int8_bytes = converter.convert()
+        out_int8 = Path(args.export_tflite_int8)
+        out_int8.parent.mkdir(parents=True, exist_ok=True)
+        out_int8.write_bytes(int8_bytes)
+
+        # Verify quantized INT8 accuracy directly on the unseen validation set!
+        interp = tf.lite.Interpreter(model_content=int8_bytes)
+        interp.allocate_tensors()
+        in_d = interp.get_input_details()[0]
+        out_d = interp.get_output_details()[0]
+        in_s, in_zp = in_d['quantization']
+        out_s, out_zp = out_d['quantization']
+        q_preds = []
+        for sample in x_val_n:
+            q_in = np.clip(np.round(sample[None, ...] / in_s + in_zp), -128, 127).astype(np.int8)
+            interp.set_tensor(in_d['index'], q_in)
+            interp.invoke()
+            q_out = interp.get_tensor(out_d['index'])[0]
+            f_out = (q_out.astype(np.float32) - out_zp) * out_s
+            q_preds.append(int(np.argmax(f_out)))
+        int8_acc = float(np.mean(np.array(q_preds) == y_val))
+        print(
+            f'  Saved INT8 TFLite (NPU) -> {out_int8} ({len(int8_bytes) / 1024.0:.1f} KB | '
+            f'unseen val acc: {int8_acc * 100:.1f}%)'
+        )
 
     return {
         'out_path': str(out_path),
         'classes': classes,
         'params': int(model.count_params()),
         'val_accuracy': val_acc,
+        'int8_val_accuracy': int8_acc,
         'keras_numpy_max_diff': max_diff,
         'latency_ms': per_frame_ms,
         'size_kb': size_kb,
@@ -539,7 +581,9 @@ def main():
     p.add_argument('--data', type=Path, default=ROOT / 'datasets/moves', help='Folder with <move_name>/*.npz clips')
     p.add_argument('--out', type=Path, default=ROOT / 'models/dance_tcn.npz', help='Output pure-NumPy .npz model')
     p.add_argument('--export-keras', type=Path, default=None, help='Optional .keras model save path')
-    p.add_argument('--export-tflite', type=Path, default=None, help='Optional .tflite export path')
+    p.add_argument('--export-tflite', type=Path, default=None, help='Optional FP32 .tflite export path')
+    p.add_argument('--export-tflite-int8', type=Path, default=None,
+                   help='Optional full-integer INT8 .tflite export (calibrated for STM32MP257 NPU / stedgeai)')
     p.add_argument('--window-frames', type=int, default=DEFAULT_WINDOW_FRAMES)
     p.add_argument('--window-seconds', type=float, default=DEFAULT_WINDOW_SECONDS)
     p.add_argument('--aug-per-clip', type=int, default=20)

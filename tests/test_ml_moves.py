@@ -85,11 +85,13 @@ class Tier2DanceRecognitionTests(unittest.TestCase):
     def test_keras_tcn_train_export_numpy_parity_and_streaming_classifier(self):
         with tempfile.TemporaryDirectory() as tmp:
             out_npz = Path(tmp) / 'test_tcn.npz'
+            out_int8 = Path(tmp) / 'test_tcn_int8.tflite'
             args = types.SimpleNamespace(
                 data=Path(tmp),
                 out=out_npz,
                 export_keras=None,
                 export_tflite=None,
+                export_tflite_int8=out_int8,
                 window_frames=DEFAULT_WINDOW_FRAMES,
                 aug_per_clip=4,
                 epochs=12,
@@ -101,8 +103,11 @@ class Tier2DanceRecognitionTests(unittest.TestCase):
             )
             stats = train_and_export(args)
 
-            # 1) High validation accuracy on synthetic dance moves.
+            # 1) High validation accuracy on synthetic dance moves (both FP32 and full-INT8 TFLite!).
             self.assertGreater(stats['val_accuracy'], 0.90)
+            self.assertTrue(out_int8.is_file())
+            self.assertGreater(stats['int8_val_accuracy'], 0.90)
+            self.assertLess(out_int8.stat().st_size / 1024.0, 60.0)
             # 2) Bit-exact numerical parity between Keras 3 and pure-NumPy runtime!
             self.assertLess(stats['keras_numpy_max_diff'], 1e-4)
             # 3) Embedded-friendly size (< 200 KB) & fast pure-NumPy latency (< 2.0 ms/frame).

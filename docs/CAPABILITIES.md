@@ -1,6 +1,8 @@
 # CV-DAW — System Capabilities Reference
 
 > **Living Document**: This file is the single source of truth for everything CV-DAW currently recognizes, synthesizes, and controls. Keep it updated whenever moves, thresholds, styles, or DSP features are tuned.
+>
+> **STM32MP257F-DK Compatibility Mandate**: Every tweak to vision, moves, ML, or DSP **must** remain compatible with the **STM32MP257F-DK (OpenSTLinux 6.6 Scarthgap, dual Cortex-A35 + 1.35 TOPS NPU)** — use only the 15 shared 2D COCO-17/MediaPipe joints, never import `mediapipe` or `tensorflow`/`keras` in the core runtime path, keep Tier 2 TCN models pure-NumPy `.npz` (plus optional INT8 `.tflite`), and preserve Cortex-A35 DSP budget & flexible ALSA options. See [docs/STM32MP257F_DK.md](STM32MP257F_DK.md).
 
 ---
 

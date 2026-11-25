@@ -2,6 +2,8 @@
 
 **Moves Lab** (`composer/moves/lab.py`) is CV-DAW's standalone, **zero-audio** workbench for debugging vision tracking, testing built-in move responsiveness, recording labeled dance datasets, and training/testing custom neural dance models (**Keras 3 1D-TCN** and **Few-Shot DTW**) before connecting them to the C++20 music engine.
 
+> **STM32MP257F-DK Compatibility Rule**: Any custom move, threshold tweak, or model trained via Moves Lab **must** stay compatible with the STM32MP257F-DK target: rely only on full-body 2D silhouettes (15 joints shared with MoveNet INT8 COCO-17 — no finger/face gestures), export to pure-NumPy `models/dance_tcn.npz` (and optionally `--export-tflite-int8`), and keep `eval_stride >= 2` so Cortex-A35 Core 0 CPU load stays `< 2%`. See [STM32MP257F_DK.md](STM32MP257F_DK.md).
+
 ---
 
 ## 1. Quick Start Commands

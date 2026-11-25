@@ -25,7 +25,7 @@ import numpy as np
 from ..cameras import resolve_camera
 from ..kinematics.body import FeatureExtractor
 from ..recorder import KEY_LANDMARKS
-from ..vision import AsyncPoseWorker, LatestCamera
+from ..vision import AsyncPoseWorker, LatestCamera, create_pose_backend
 from .pose_frame import CANONICAL_JOINTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -262,7 +262,6 @@ def _draw_lab_hud(
 
 def run_live_lab(args):
     import cv2
-    from ..tracker import PoseTracker
 
     tcn_path = args.tcn_model
     if tcn_path is None:
@@ -270,13 +269,19 @@ def run_live_lab(args):
         if default_tcn.is_file():
             tcn_path = default_tcn
 
-    detector = PoseTracker(model=args.pose_model, inference_width=args.inference_width)
+    detector = create_pose_backend(
+        args.pose_backend,
+        pose_model=args.pose_model,
+        inference_width=args.inference_width,
+        npu_model=args.npu_model,
+    )
+    backend_tag = args.pose_backend if args.pose_backend != 'auto' else detector.__class__.__name__
     if args.gstreamer:
-        print(f'Moves Lab — GStreamer: {args.gstreamer} | Modelo: {args.pose_model} @ {args.inference_width}px', flush=True)
+        print(f'Moves Lab — GStreamer: {args.gstreamer} | Backend: {backend_tag}', flush=True)
         capture = LatestCamera(cv2, 0, fps=args.fps, pipeline=args.gstreamer)
     else:
         camera_index, camera_name = resolve_camera(args.camera)
-        print(f'Moves Lab — Cámara: {camera_name} (índice {camera_index}) | Modelo: {args.pose_model} @ {args.inference_width}px', flush=True)
+        print(f'Moves Lab — Cámara: {camera_name} (índice {camera_index}) | Backend: {backend_tag}', flush=True)
         capture = LatestCamera(cv2, camera_index, fps=args.fps)
     if tcn_path:
         print(f'  Tier 2 Keras TCN runtime loaded: {tcn_path}', flush=True)
@@ -434,6 +439,10 @@ def main():
     p.add_argument('--dataset-dir', type=Path, default=ROOT / 'datasets/moves', help='Dataset output root')
     p.add_argument('--camera', type=int, default=None, help='Camera index override')
     p.add_argument('--gstreamer', type=str, default=None, help='Optional GStreamer camera pipeline (STM32 CSI/V4L2)')
+    p.add_argument('--pose-backend', choices=('auto', 'mediapipe', 'stai-npu', 'movenet-tflite'), default='auto',
+                   help='Pose backend: auto (MediaPipe on Mac, STAI NPU on STM32MP257F-DK)')
+    p.add_argument('--npu-model', type=Path, default=None,
+                   help='Path to MoveNet INT8 (.nb/.tflite) model for STM32 NPU or TFLite')
     p.add_argument('--pose-model', choices=('lite', 'full'), default='lite', help='MediaPipe Pose model (default: lite)')
     p.add_argument('--inference-width', type=int, default=320, help='Pose inference resize width in px (default: 320)')
     p.add_argument('--fps', type=int, default=60, help='Requested camera FPS (default: 60)')
