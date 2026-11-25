@@ -14,10 +14,11 @@ from .cameras import resolve_camera
 from .diagnose import write_report
 from .features import FeatureExtractor, mock_features
 from .ipc import Bridge
+from .moves import CANONICAL_JOINTS
 from .recorder import SessionRecorder
 from .styles import STYLE_ORDER
 from .ui import draw_hud, handle_window_key
-from .vision import AsyncPoseWorker, LatestCamera
+from .vision import AsyncPoseWorker, LatestCamera, create_pose_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +43,16 @@ def start_engine(args):
     if getattr(args, 'live_record', None) and not args.offline_audio:
         Path(args.live_record).parent.mkdir(parents=True, exist_ok=True)
         command += ['--live-record', str(args.live_record)]
+    if getattr(args, 'alsa_device', None):
+        command += ['--alsa-device', str(args.alsa_device)]
+    if getattr(args, 'period_frames', None):
+        command += ['--period-frames', str(args.period_frames)]
+    if getattr(args, 'alsa_periods', None):
+        command += ['--alsa-periods', str(args.alsa_periods)]
+    if getattr(args, 'strict_alsa', False):
+        command += ['--strict-alsa']
+    if getattr(args, 'strict_rt', False):
+        command += ['--strict-rt']
     if args.seconds and not args.offline_audio:
         command += ['--seconds', str(args.seconds + 10)]
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, bufsize=1)
@@ -83,7 +94,24 @@ def _build_parser():
                    help='Estilo inicial (1-6 o N/P en vivo)')
     p.add_argument('--video', type=Path)
     p.add_argument('--camera', type=int, default=None, help='Índice de cámara (por defecto webcam integrada)')
-    p.add_argument('--pose-model', choices=('full', 'lite'), default='full', help='Modelo MediaPipe Pose (.task)')
+    p.add_argument('--gstreamer', type=str, default=None, help='Pipeline GStreamer opcional (e.g. STM32MP257F-DK CSI/V4L2)')
+    p.add_argument('--pose-backend', choices=('auto', 'mediapipe', 'stai-npu', 'movenet-tflite'), default='auto',
+                   help='Motor de pose: auto (MediaPipe en Mac, STAI NPU en STM32MP257F-DK)')
+    p.add_argument('--npu-model', type=Path, default=None,
+                   help='Ruta al modelo MoveNet INT8 (.nb/.tflite) para STM32 NPU o TFLite')
+    p.add_argument('--pose-model', choices=('lite', 'full'), default='lite',
+                   help='Modelo MediaPipe Pose (.task) — lite (30-60 FPS) por defecto')
+    p.add_argument('--inference-width', type=int, default=320,
+                   help='Ancho de entrada para inferencia Pose (320px = máxima velocidad, 0 = nativo)')
+    p.add_argument('--tcn-model', type=Path, default=None,
+                   help='Modelo Tier 2 pure-NumPy TCN (.npz) opcional (auto-carga models/dance_tcn.npz si existe)')
+    p.add_argument('--dtw-dir', type=Path, default=None,
+                   help='Carpeta de plantillas Tier 2 DTW opcional (e.g. datasets/moves)')
+    p.add_argument('--alsa-device', type=str, default=None, help='Dispositivo ALSA Linux/STM32 (e.g. default, plughw:0,0)')
+    p.add_argument('--period-frames', type=int, default=None, help='Frames por callback ALSA (128 o 256)')
+    p.add_argument('--alsa-periods', type=int, default=None, help='Periodos ALSA (2..8)')
+    p.add_argument('--strict-alsa', action='store_true', help='Modo ALSA exclusivo estricto (calificación RT)')
+    p.add_argument('--strict-rt', action='store_true', help='Falla si mlockall/SCHED_FIFO no tienen permisos')
     p.add_argument('--tempo-lock', action='store_true', help='Bloquea el BPM inicial')
     p.add_argument('--no-mirror', action='store_true', help='Desactiva espejo en la ventana de cámara')
     p.add_argument('--seconds', type=float, default=0, help='0 = hasta q o Control+C')
@@ -138,8 +166,13 @@ def main():
     max_loop = 0.0
     energies: list[float] = []
     probes: list[float] = []
+    tcn_path = args.tcn_model
+    if tcn_path is None:
+        default_tcn = ROOT / 'models/dance_tcn.npz'
+        if default_tcn.is_file():
+            tcn_path = default_tcn
     composer = Composer(args.seed, genre=args.genre, tempo_lock=args.tempo_lock)
-    extractor = FeatureExtractor()
+    extractor = FeatureExtractor(tcn_model_path=tcn_path, dtw_dir=args.dtw_dir)
     flash_state = {'move': ('', 0.0)}
     report: dict = {}
 
@@ -153,13 +186,21 @@ def main():
 
         if args.mode != 'mock':
             import cv2
-            from .tracker import PoseTracker
 
-            detector = PoseTracker(model=args.pose_model)
+            detector = create_pose_backend(
+                args.pose_backend,
+                pose_model=args.pose_model,
+                inference_width=args.inference_width,
+                npu_model=args.npu_model,
+            )
             if args.mode == 'camera':
-                camera_index, camera_name = resolve_camera(args.camera)
-                print(f'Cámara: {camera_name} — índice OpenCV {camera_index}', flush=True)
-                capture = LatestCamera(cv2, camera_index)
+                if args.gstreamer:
+                    print(f'Cámara GStreamer: {args.gstreamer}', flush=True)
+                    capture = LatestCamera(cv2, 0, pipeline=args.gstreamer)
+                else:
+                    camera_index, camera_name = resolve_camera(args.camera)
+                    print(f'Cámara: {camera_name} — índice OpenCV {camera_index}', flush=True)
+                    capture = LatestCamera(cv2, camera_index)
                 pose_worker = AsyncPoseWorker(capture, detector)
             else:
                 capture = cv2.VideoCapture(str(args.video))
@@ -218,7 +259,9 @@ def main():
                     if features.moves and features.active_move_label:
                         flash_state['move'] = (features.active_move_label, time.monotonic() + 0.70)
                     if not args.no_window:
-                        detector.draw(image, points)
+                        name_to_idx = {name: idx for idx, name in CANONICAL_JOINTS}
+                        glitch_idxs = {name_to_idx[g] for g in features.glitch_joints if g in name_to_idx}
+                        detector.draw(image, points, glitch_indices=glitch_idxs)
                         display = cv2.flip(image, 1) if not args.no_mirror else image
                         draw_hud(cv2, display, features, composer, flash_state, rec_label)
                         cv2.imshow('CV-DAW Studio', display)

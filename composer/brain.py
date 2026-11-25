@@ -25,7 +25,9 @@ from .procedural import degree_to_midi, quantize_gesture_frame, voice_lead
 from .styles import REGISTRY, STYLE_ORDER, STYLES, StyleBlueprint, get_style
 
 RATE = 48000
-RISER_MIDI = 120  # Dedicated studio Soundwave Riser voice in C++20 DSP (limb 1)
+RISER_MIDI = 120  # Dedicated warm Atmospheric Shimmer Swell voice in C++20 DSP (limb 1)
+KICK_MIN_GAP_FRAMES = int(RATE * 0.19)  # 190 ms arbitration prevents double-flammed kick flooding
+MOVE_HIT_CUSHION_FRAMES = 160           # 3.3 ms immediate response (>128-frame DSP block, zero late cmds)
 SCALE = (0, 2, 3, 5, 7, 8, 10)
 PROGRESSION = (0, 5, 3, 4)
 
@@ -83,6 +85,7 @@ class Composer:
 
         self.strike_punch = 0.0
         self.strike_punch_at = -1e9
+        self._last_kick_frame = -RATE
         self._last_seconds = 0.0
         self._peak_bpm_conf = 0.0
         self._peak_bpm = self.profile.bpm_default
@@ -185,18 +188,18 @@ class Composer:
         shrug_sweep = 1.0 + 0.55 * features.shoulder_lift
 
         pad_bright = clamp(0.32 + 0.38 * features.left_height + 0.22 * features.expansion + 0.12 * features.head_pitch)
-        pad_cut = (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright) * level_mod * shrug_sweep * squat_filter + 1400.0 * punch + 2400.0 * rise
+        pad_cut = (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright) * level_mod * shrug_sweep * squat_filter + 1400.0 * punch + 950.0 * rise
         if choke:
             pad_cut = min(pad_cut, 1300.0)
         pad_cut = clamp(pad_cut, 380.0, 10500.0)
 
         lead_bright = clamp(0.35 + 0.42 * features.right_height + 0.15 * features.head_pitch + 0.12 * features.expansion)
-        lead_cut = (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright) * level_mod * shrug_sweep * squat_filter + 3200.0 * punch + 3200.0 * rise
+        lead_cut = (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright) * level_mod * shrug_sweep * squat_filter + 3200.0 * punch + 1100.0 * rise
         if choke:
             lead_cut = min(lead_cut, 1700.0)
         lead_cut = clamp(lead_cut, 650.0, 13200.0)
 
-        rev_lift = clamp(0.52 * features.fluidity + 0.32 * features.torso_twist + 0.32 * rise + (0.35 if (choke or frozen) else 0.0))
+        rev_lift = clamp(0.52 * features.fluidity + 0.32 * features.torso_twist + 0.28 * rise + (0.35 if (choke or frozen) else 0.0))
         pad_rev = p.reverb_pad_range[0] + (p.reverb_pad_range[1] - p.reverb_pad_range[0]) * rev_lift
         lead_rev = p.reverb_lead_range[0] + (p.reverb_lead_range[1] - p.reverb_lead_range[0]) * rev_lift
 
@@ -206,12 +209,12 @@ class Composer:
         )
         pad_pan = clamp(-0.30 * features.torso_lean - 0.20 * features.head_tilt, -0.45, 0.45)
         delay_send = clamp(
-            p.delay_send * (0.50 + 0.35 * features.fluidity) + 0.44 * tilt_mag + 0.22 * rise + (0.38 if frozen else (0.18 if choke else 0.0)),
+            p.delay_send * (0.50 + 0.35 * features.fluidity) + 0.44 * tilt_mag + 0.18 * rise + (0.38 if frozen else (0.18 if choke else 0.0)),
             0.0, 0.86,
         )
 
         resonance = clamp(
-            p.resonance + 0.90 * features.shoulder_lift + 0.40 * abs(features.torso_lean) + 0.55 * rise + 0.45 * squat + (0.40 if choke else 0.0),
+            p.resonance + 0.90 * features.shoulder_lift + 0.40 * abs(features.torso_lean) + 0.16 * rise + 0.45 * squat + (0.40 if choke else 0.0),
             0.65, 2.55,
         )
         lead_bend = clamp((features.right_bend - 0.5) * 0.30 + (1.0 - features.symmetry) * 0.08, -0.35, 0.35)
@@ -288,15 +291,23 @@ class Composer:
             return p.bright_chord
         return p.progression[phrase_index % len(p.progression)]
 
+    def _try_emit_kick(self, events: list[Event], target_frame: int, vel: float, *, force: bool = False) -> bool:
+        """Emit a studio Kick (MIDI 36) with 190 ms arbitration so moves and sequencer never double-flam."""
+        if not force and abs(target_frame - self._last_kick_frame) < KICK_MIN_GAP_FRAMES:
+            return False
+        self._last_kick_frame = target_frame
+        events.append(Event(3, 0, 36, vel, target_frame))
+        return True
+
     def _emit_drop_impact(self, q_frame: int, features: Features, events: list[Event]):
         p = self.profile
         if self._riser_playing:
             events.append(Event(1, 1, RISER_MIDI, 0.0, q_frame))
             self._riser_playing = False
         sub_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+        self._try_emit_kick(events, q_frame, 0.96, force=True)
         events.extend((
-            Event(3, 0, 36, 0.96, q_frame),
-            Event(3, 0, 49, 0.74, q_frame),
+            Event(3, 0, 49, 0.72, q_frame),
             Event(2, 0, sub_root, 0.90, q_frame),
             Event(2, 1, sub_root, 0.0, q_frame + int(RATE * 0.60)),
         ))
@@ -308,12 +319,12 @@ class Composer:
             events.extend((Event(0, 0, note, vel, on_f), Event(0, 1, note, 0.0, off_f)))
 
     def _translate_moves(self, features: Features, frame: int, seconds: float, interval: float, events: list[Event]) -> bool:
-        """Translate all recognized full-body & leg MoveEvents into genre-authentic studio sounds."""
+        """Translate all recognized Tier 1 & Tier 2 MoveEvents into genre-authentic studio sounds."""
         p = self.profile
-        hit_frame = frame + 384  # 8 ms immediate punch feel (zero late_commands!)
+        hit_frame = frame + MOVE_HIT_CUSHION_FRAMES  # 3.3 ms immediate feel (zero late_commands!)
         drop_fired = False
 
-        # Release soundwave riser cleanly if arms drop back down below chest.
+        # Release atmospheric shimmer swell cleanly if arms drop back down below chest.
         if self._riser_playing and features.soundwave_rise < 0.08:
             events.append(Event(1, 1, RISER_MIDI, 0.0, hit_frame))
             self._riser_playing = False
@@ -323,40 +334,40 @@ class Composer:
                 self.strike_punch = max(self.strike_punch, mv.intensity)
                 self.strike_punch_at = seconds
                 if mv.side == 'right':
-                    # Right Hard Punch: Explosive Octave Power Stab + Crisp Genre Clap/Snare Crack!
+                    # Right Hard Punch: Immediate Octave Power Stab + Crisp Genre Clap/Snare Crack!
                     oct_deg = self._register_zone * len(p.scale)
                     n_root = max(58, min(84, degree_to_midi(self.chord_degree + 4 + oct_deg, p.base_midi, p.scale)))
                     n_oct = min(92, n_root + 12)
                     events.extend((
                         Event(1, 0, n_root, clamp(0.88 + 0.12 * mv.intensity), hit_frame),
-                        Event(1, 1, n_root, 0.0, hit_frame + int(RATE * 0.34)),
+                        Event(1, 1, n_root, 0.0, hit_frame + int(RATE * 0.30)),
                         Event(1, 0, n_oct, clamp(0.84 + 0.14 * mv.intensity), hit_frame),
-                        Event(1, 1, n_oct, 0.0, hit_frame + int(RATE * 0.38)),
-                        Event(3, 0, 38, clamp(0.82 + 0.16 * mv.intensity), hit_frame),
+                        Event(1, 1, n_oct, 0.0, hit_frame + int(RATE * 0.34)),
+                        Event(3, 0, 38, clamp(0.80 + 0.16 * mv.intensity), hit_frame),
                     ))
                 else:
-                    # Left Hard Punch: Deep Sub-Bass 808 Boom + Heavy Club Kick Slam!
+                    # Left Hard Punch: Deep 808 Sub-Bass Boom + Warm Low Chord Punch (+ arbitrated Kick, never floods!).
                     sub_note = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
                     chord_hit = max(52, min(78, degree_to_midi(self.chord_degree + 2, p.base_midi, p.scale)))
+                    self._try_emit_kick(events, hit_frame, clamp(0.86 + 0.12 * mv.intensity))
                     events.extend((
-                        Event(3, 0, 36, clamp(0.90 + 0.10 * mv.intensity), hit_frame),
                         Event(2, 0, sub_note, clamp(0.90 + 0.10 * mv.intensity), hit_frame),
-                        Event(2, 1, sub_note, 0.0, hit_frame + int(RATE * 0.45)),
+                        Event(2, 1, sub_note, 0.0, hit_frame + int(RATE * 0.42)),
                         Event(0, 0, chord_hit, clamp(0.76 + 0.18 * mv.intensity), hit_frame),
-                        Event(0, 1, chord_hit, 0.0, hit_frame + int(RATE * 0.55)),
+                        Event(0, 1, chord_hit, 0.0, hit_frame + int(RATE * 0.48)),
                     ))
 
             elif mv.kind == 'DOUBLE_ARM_RISE':
-                # Launch Studio Sweeping Soundwave Riser (MIDI 120) + Ascending Shimmer Swell!
+                # Launch Warm Studio Atmospheric Shimmer Swell (MIDI 120) + gentle fifth pad glow (zero siren!).
                 self._riser_playing = True
-                events.append(Event(1, 0, RISER_MIDI, clamp(0.76 + 0.22 * mv.intensity), hit_frame))
+                events.append(Event(1, 0, RISER_MIDI, clamp(0.58 + 0.22 * mv.intensity), hit_frame))
                 step = int(interval * 0.5)
-                for i, deg_off in enumerate((4, 6, 8)):
-                    note = max(60, min(91, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
+                for i, deg_off in enumerate((4, 7)):
+                    note = max(58, min(86, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
                     on_f = hit_frame + i * step
                     events.extend((
-                        Event(0, 0, note, clamp(0.58 + 0.10 * i), on_f),
-                        Event(0, 1, note, 0.0, on_f + int(RATE * 0.90)),
+                        Event(0, 0, note, clamp(0.44 + 0.08 * i), on_f),
+                        Event(0, 1, note, 0.0, on_f + int(RATE * 1.10)),
                     ))
 
             elif mv.kind == 'OVERHEAD_DROP':
@@ -372,7 +383,6 @@ class Composer:
                 self.beat_active = True
                 self.strike_punch = max(self.strike_punch, 0.90)
                 self.strike_punch_at = seconds
-                # Euphoric 3-note ascending harmonic fanfare + open hat splash!
                 fanfare = tuple(
                     max(55, min(91, degree_to_midi(self.chord_degree + d, p.base_midi, p.scale)))
                     for d in (0, 4, 8)
@@ -383,10 +393,9 @@ class Composer:
                 drop_fired = True
 
             elif mv.kind == 'ARM_WAVE':
-                # 6-note Liquid Stereo-Panned Arpeggio Ripple synchronized with the arm wave direction!
                 self._wave_dir = 1 if mv.side == 'lr' else -1
                 self._wave_start = seconds
-                step = max(3600, int(interval * 0.45))  # silky ~80-110ms cascade
+                step = max(3600, int(interval * 0.45))
                 degrees = (0, 2, 4, 6, 8, 11) if mv.side == 'lr' else (11, 8, 6, 4, 2, 0)
                 for idx, deg_off in enumerate(degrees):
                     midi = max(55, min(91, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
@@ -398,7 +407,6 @@ class Composer:
                     ))
 
             elif mv.kind == 'BODY_FREEZE':
-                # Let a single lush resonant bell chord ring into the dotted-8th echo tail!
                 ring = max(60, min(88, degree_to_midi(self.chord_degree + 8, p.base_midi, p.scale)))
                 events.extend((
                     Event(1, 0, ring, 0.78, hit_frame),
@@ -410,8 +418,8 @@ class Composer:
                 self.strike_punch_at = seconds
                 if mv.side == 'right':
                     sub_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                    self._try_emit_kick(events, hit_frame, 0.96, force=True)
                     events.extend((
-                        Event(3, 0, 36, 0.96, hit_frame),
                         Event(2, 0, sub_root, 0.92, hit_frame),
                         Event(2, 1, sub_root, 0.0, hit_frame + int(RATE * 0.36)),
                     ))
@@ -424,12 +432,11 @@ class Composer:
                     ))
 
             elif mv.kind == 'SQUAT_RISE':
-                # Explosive filter snap-open + punchy Kick & Bright Chord Pop!
                 self.strike_punch = 0.98
                 self.strike_punch_at = seconds
                 sub_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                self._try_emit_kick(events, hit_frame, 0.94, force=True)
                 events.extend((
-                    Event(3, 0, 36, 0.95, hit_frame),
                     Event(2, 0, sub_root, 0.90, hit_frame),
                     Event(2, 1, sub_root, 0.0, hit_frame + int(RATE * 0.40)),
                 ))
@@ -439,17 +446,29 @@ class Composer:
                 drop_fired = True
 
             elif mv.kind == 'JUMP_HIT':
-                # Uplifting Festival Air Crash + Kick + High Sparkle Octave!
                 self.strike_punch = 0.95
                 self.strike_punch_at = seconds
                 hi_note = max(67, min(93, degree_to_midi(self.chord_degree + 11, p.base_midi, p.scale)))
+                self._try_emit_kick(events, hit_frame, 0.96, force=True)
                 events.extend((
-                    Event(3, 0, 36, 0.96, hit_frame),
                     Event(3, 0, 49, 0.72, hit_frame),
                     Event(1, 0, hi_note, 0.88, hit_frame),
                     Event(1, 1, hi_note, 0.0, hit_frame + int(RATE * 0.45)),
                 ))
                 drop_fired = True
+
+            elif mv.kind != 'ARMS_CROSS_CUT':
+                # Custom Tier 2 (Keras TCN / DTW) dance move -> expressive 4-note harmonic sparkle bloom!
+                self.strike_punch = max(self.strike_punch, 0.72 * mv.intensity)
+                self.strike_punch_at = seconds
+                step = max(3200, int(interval * 0.40))
+                for idx, deg_off in enumerate((0, 4, 7, 11)):
+                    midi = max(58, min(91, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
+                    on_f = hit_frame + idx * step
+                    events.extend((
+                        Event(1, 0, midi, clamp(0.64 + 0.16 * mv.intensity), on_f),
+                        Event(1, 1, midi, 0.0, on_f + int(RATE * 0.36)),
+                    ))
 
         return drop_fired
 
@@ -596,7 +615,7 @@ class Composer:
                 kicks = drums.kick_full if use_full else drums.kick_groove
                 hats = drums.hat_full if use_full else drums.hat_groove
                 if slot in kicks:
-                    events.append(Event(3, 0, 36, clamp(0.52 + 0.38 * live_energy, 0.38, 0.92), target))
+                    self._try_emit_kick(events, target, clamp(0.52 + 0.38 * live_energy, 0.38, 0.92))
                 if use_full and slot in drums.snare:
                     events.append(Event(3, 0, 38, clamp(0.40 + 0.36 * live_energy, 0.32, 0.84), target + swing_amt))
                 if slot in hats:

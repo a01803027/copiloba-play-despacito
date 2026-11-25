@@ -1,6 +1,7 @@
-# Python 3.14+, macOS Apple Silicon; MediaPipe Tasks API (PoseLandmarker / HandLandmarker).
-numpy==2.5.4
-opencv-contrib-python==5.0.0.93
+# Python 3.13+, macOS Apple Silicon; MediaPipe Pose Tasks + TensorFlow/Keras 3 ML pipeline.
+numpy==2.5.5
+opencv-contrib-python==5.1.0.95
 mediapipe==1.2.3
-pygame-ce==2.5.8
 sounddevice==0.5.6
+tensorflow==2.21.0
+keras==3.15.1
