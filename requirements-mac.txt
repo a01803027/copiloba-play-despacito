@@ -5,3 +5,5 @@ mediapipe==1.2.3
 sounddevice==0.5.6
 tensorflow==2.21.0
 keras==3.15.1
+bleak==3.1.0
+pyserial==3.5

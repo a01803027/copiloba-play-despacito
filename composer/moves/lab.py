@@ -26,6 +26,8 @@ from ..cameras import resolve_camera
 from ..kinematics.body import FeatureExtractor
 from ..recorder import KEY_LANDMARKS
 from ..vision import AsyncPoseWorker, LatestCamera, create_pose_backend
+from ..wearable import DEFAULT_DEVICE_NAME, create_shirt_orchestrator
+from .lab_diagnose import LabSessionRecorder, audit_dataset_dir, write_lab_report
 from .pose_frame import CANONICAL_JOINTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -256,7 +258,12 @@ def _draw_lab_hud(
             cv2.LINE_AA,
         )
 
-    cv2.putText(image, '[r] Reset Counters   [q] Quit & Print Summary', (10, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 210, 225), 1, cv2.LINE_AA)
+    footer_txt = (
+        '[u] Undo Last Clip   [r] Reset   [q] Quit'
+        if rec_overlay is not None
+        else '[Space/m] Mark Attempt   [r] Reset   [q] Quit & Save Summary'
+    )
+    cv2.putText(image, footer_txt, (10, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 210, 225), 1, cv2.LINE_AA)
     return image
 
 
@@ -289,7 +296,41 @@ def run_live_lab(args):
         print(f'  Tier 2 DTW templates loaded:     {args.dtw_dir}', flush=True)
 
     worker = AsyncPoseWorker(capture, detector)
-    extractor = FeatureExtractor(tcn_model_path=tcn_path, dtw_dir=args.dtw_dir)
+    extractor = FeatureExtractor(
+        tcn_model_path=tcn_path,
+        dtw_dir=args.dtw_dir,
+        tier2_threshold=args.threshold,
+    )
+    shirt = create_shirt_orchestrator(
+        args.wearable,
+        leds_spec=args.wearable_leds,
+        reverse_left=not args.wearable_no_reverse_left,
+        device_name=args.wearable_name,
+        address=args.wearable_addr,
+        serial_port=args.wearable_port,
+    )
+    if shirt is not None:
+        print(f'  Wearable LED Shirt active:       {args.wearable} ({args.wearable_name}, {args.wearable_leds})', flush=True)
+
+    lab_recorder: LabSessionRecorder | None = None
+    diag_jsonl: Path | None = None
+    if args.diagnose is not None:
+        if not args.seconds:
+            args.seconds = float(args.diagnose)
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        args.diagnose_dir.mkdir(parents=True, exist_ok=True)
+        diag_jsonl = args.diagnose_dir / f'lab_diag_{stamp}.jsonl'
+        lab_recorder = LabSessionRecorder(
+            diag_jsonl,
+            {
+                'pose_backend': backend_tag,
+                'pose_model': args.pose_model,
+                'tcn_model': str(tcn_path) if tcn_path else None,
+                'dtw_dir': str(args.dtw_dir) if args.dtw_dir else None,
+                'threshold': args.threshold,
+            },
+        )
+        print(f'Moves Lab Diagnostic Recording ({args.seconds:.0f}s) -> {diag_jsonl} (press Space/m to mark attempts!)', flush=True)
 
     cv2.namedWindow('CV-DAW Moves Lab', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('CV-DAW Moves Lab', 960, 720)
@@ -310,6 +351,7 @@ def run_live_lab(args):
     rec_feats: list[tuple[float, ...]] = []
     rec_ts: list[float] = []
     saved_paths: list[Path] = []
+    pending_mark = False
 
     try:
         while not args.seconds or (time.monotonic() - started) < args.seconds:
@@ -328,6 +370,8 @@ def run_live_lab(args):
 
                 infer_ms = 0.85 * infer_ms + 0.15 * ((time.monotonic() - t_start) * 1000.0)
                 elapsed = time.monotonic() - started
+                if shirt is not None:
+                    shirt.update(feat, None)
                 for mv in feat.moves:
                     key = f'{mv.kind}:{mv.side}'
                     counts[key] += 1
@@ -378,16 +422,34 @@ def run_live_lab(args):
                             rec_phase = 'countdown'
                             rec_phase_start = now
 
+                if lab_recorder is not None:
+                    dtw_m = extractor.dtw_matcher
+                    tcn_c = extractor.tcn_classifier
+                    lab_recorder.record_frame(
+                        elapsed_s=elapsed,
+                        points=points,
+                        pose_frame=pf,
+                        features=feat,
+                        dtw_scores=dtw_m.last_scores if dtw_m else None,
+                        dtw_distances=dtw_m.last_distances if dtw_m else None,
+                        dtw_thresholds=dtw_m.label_thresholds if dtw_m else None,
+                        tcn_probs=tcn_c.last_probs if tcn_c else None,
+                        tcn_raw_probs=tcn_c.last_raw_probs if tcn_c else None,
+                        marked_attempt=pending_mark,
+                    )
+                    pending_mark = False
+
                 glitch_idxs = {_NAME_TO_IDX[g] for g in feat.glitch_joints if g in _NAME_TO_IDX}
                 detector.draw(image, points, glitch_indices=glitch_idxs)
                 display = cv2.flip(image, 1) if not args.no_mirror else image
+                rec_badge = f'DIAG REC {elapsed:04.1f}/{args.seconds:.0f}s' if (lab_recorder and args.seconds) else ''
                 _draw_lab_hud(
                     cv2,
                     display,
                     feat,
                     fps=fps,
                     infer_ms=1000.0 / max(fps, 1.0),
-                    model_name=args.pose_model,
+                    model_name=f'{args.pose_model} {rec_badge}'.strip(),
                     glitches_total=extractor.sanitizer.total_glitches_blocked,
                     suppressed_total=extractor.move_recognizer.arbiter.suppressed_count,
                     ticker=ticker,
@@ -406,16 +468,43 @@ def run_live_lab(args):
                 counts.clear()
                 ticker.clear()
                 print('Moves Lab counters reset.', flush=True)
+            if key in (ord(' '), ord('m'), ord('M')) and rec_label is None:
+                pending_mark = True
+                flash = ('ATTEMPT MARKED!', time.monotonic() + 0.55)
+                print(f'Marked attempt at t={time.monotonic() - started:.2f}s', flush=True)
+            if key in (ord('u'), ord('U'), 8, 127) and rec_label is not None:
+                if saved_paths:
+                    last_file = saved_paths.pop()
+                    if last_file.is_file():
+                        last_file.unlink()
+                    rec_clips_done = max(0, rec_clips_done - 1)
+                    rec_phase = 'countdown'
+                    rec_phase_start = time.monotonic()
+                    flash = ('DELETED LAST CLIP!', time.monotonic() + 0.80)
+                    print(f'Undid & deleted flopped clip: {last_file.name} (now at {rec_clips_done}/{args.clips})', flush=True)
             time.sleep(0.002)
     except KeyboardInterrupt:
         pass
     finally:
+        if shirt is not None:
+            shirt.close()
         worker.close()
         capture.close()
         detector.close()
         cv2.destroyAllWindows()
 
     dur = max(1e-3, time.monotonic() - started)
+    summary = {
+        'duration_s': round(dur, 2),
+        'glitches_blocked': extractor.sanitizer.total_glitches_blocked,
+        'arbiter_filtered': extractor.move_recognizer.arbiter.suppressed_count,
+        'counts': dict(counts),
+    }
+    if lab_recorder is not None and diag_jsonl is not None:
+        lab_recorder.close(summary)
+        ds_dir = args.dtw_dir or args.dataset_dir
+        _, report_md = write_lab_report(diag_jsonl, dataset_dir=ds_dir)
+        print(f'\n=== MOVES LAB DIAGNOSTIC SAVED ===\nJSONL:  {diag_jsonl}\nREPORT: {report_md}', flush=True)
     print(f'\n=== MOVES LAB SESSION SUMMARY ({dur:.1f}s) ===')
     print(f'  Glitches blocked:  {extractor.sanitizer.total_glitches_blocked}')
     print(f'  Arbiter filtered:  {extractor.move_recognizer.arbiter.suppressed_count}')
@@ -429,6 +518,13 @@ def main():
     p = argparse.ArgumentParser(description='CV-DAW Standalone Moves Lab (Vision, Recognition, Clip Recorder & ML HUD)')
     p.add_argument('--replay', type=Path, nargs='+', default=None,
                    help='Replay one or more recorded diagnostic .jsonl files offline')
+    p.add_argument('--audit-dataset', action='store_true',
+                   help='Audit datasets/moves/ clips for duration, 2D motion visibility, and separability')
+    p.add_argument('--diagnose', nargs='?', const=25.0, type=float, default=None,
+                   help='Record a Moves Lab diagnostic session (JSONL + _report.md in artifacts/)')
+    p.add_argument('--diagnose-dir', type=Path, default=ROOT / 'artifacts', help='Output folder for --diagnose')
+    p.add_argument('--threshold', type=float, default=None,
+                   help='Optional sensitivity override for Tier 2 TCN/DTW (e.g. 0.55 looser .. 0.80 stricter)')
     p.add_argument('--tcn-model', type=Path, default=None, help='Optional pure-NumPy TCN .npz model path')
     p.add_argument('--dtw-dir', type=Path, default=None, help='Optional DTW templates folder (datasets/moves)')
     p.add_argument('--record-move', type=str, default=None,
@@ -448,7 +544,19 @@ def main():
     p.add_argument('--fps', type=int, default=60, help='Requested camera FPS (default: 60)')
     p.add_argument('--seconds', type=float, default=0.0, help='Optional timed run (0 = until q)')
     p.add_argument('--no-mirror', action='store_true', help='Disable horizontal mirror display')
+    p.add_argument('--wearable', choices=('off', 'ble', 'serial', 'mock'), default='off',
+                   help='Optional ESP32 LED shirt output during lab testing (ble, serial, mock)')
+    p.add_argument('--wearable-name', default=DEFAULT_DEVICE_NAME, help='BLE peripheral name (default: CV-DAW-SHIRT)')
+    p.add_argument('--wearable-addr', default=None, help='Optional explicit BLE MAC / UUID')
+    p.add_argument('--wearable-port', default=None, help='USB Serial port when --wearable serial')
+    p.add_argument('--wearable-leds', default='25,10,25', help='Segment LED counts left,chest,right')
+    p.add_argument('--wearable-no-reverse-left', action='store_true', help='Disable left-arm shoulder->wrist inversion')
     args = p.parse_args()
+
+    if args.audit_dataset:
+        res = audit_dataset_dir(args.dtw_dir or args.dataset_dir)
+        print(json.dumps(res, indent=2))
+        return
 
     if args.replay:
         for path in args.replay:

@@ -19,14 +19,20 @@
 .venv-mac/bin/python -m composer.moves.lab --record-move body_roll --clips 15 --clip-seconds 1.2
 .venv-mac/bin/python -m composer.moves.lab --record-move idle_random --clips 20 --clip-seconds 1.2
 
-# 4. Test immediately with Few-Shot DTW (zero training required — works from 3-5 clips!):
+# 4. Audit your recorded dataset health (checks 2D visibility, duration & separability):
+.venv-mac/bin/python -m composer.moves.lab --audit-dataset
+
+# 5. Test immediately with Few-Shot DTW (multi-scale speed & posture tolerant):
 .venv-mac/bin/python -m composer.moves.lab --dtw-dir datasets/moves
 
-# 5. Train the embedded Keras 3 1D-TCN & export pure-NumPy models/dance_tcn.npz (~62 KB):
+# 6. Record a Lab Diagnostic Session (press SPACE or M right after any failed attempt!):
+.venv-mac/bin/python -m composer.moves.lab --dtw-dir datasets/moves --diagnose 30
+
+# 7. Train the embedded Keras 3 1D-TCN & export pure-NumPy models/dance_tcn.npz (~62 KB):
 .venv-mac/bin/python ml/train_move_net.py --data datasets/moves --out models/dance_tcn.npz
 
-# 6. Test your trained neural network live in Moves Lab:
-.venv-mac/bin/python -m composer.moves.lab --tcn-model models/dance_tcn.npz
+# 8. Test your trained neural network live (optional `--threshold 0.58` for looser matching):
+.venv-mac/bin/python -m composer.moves.lab --tcn-model models/dance_tcn.npz --diagnose 30
 ```
 
 ---
@@ -45,8 +51,20 @@ When running live, Moves Lab opens a clean OpenCV window with **zero audio engin
 | **Bottom-Right Panel** | **TIER 2 ML / DTW** live probability bars (shown when `--tcn-model` or `--dtw-dir` is active) | Bars turn **green** when crossing the `78%` enter threshold; `idle_random` should dominate (`>70%`) whenever you aren't doing a move. |
 
 **Live Hotkeys:**
+- **`Space` / `m`** *(Live / `--diagnose` mode)* — **Mark Attempt!** Drops a timestamped marker in the diagnostic log right after you perform a move so `artifacts/lab_diag_*_report.md` tells us the exact score, DTW distance, and why it fired or missed.
+- **`u` / `Backspace`** *(`--record-move` mode)* — **Undo Flopped Clip!** Immediately deletes the last saved `.npz` clip and steps the counter back by 1 so you can redo it on the spot.
 - **`r`** — Reset all counters, baseline height, and recent move ticker.
-- **`q`** — Quit and print a full session breakdown table in the terminal.
+- **`q`** — Quit and save/print the session summary.
+
+---
+
+### Why Some Moves Fail Facing Dead-On (The 2D Torso / Frontal Body Roll Limitation)
+Both MediaPipe Pose and STM32 MoveNet (`COCO-17`) represent your entire torso with **only 4 corner points** (`l_shoulder`, `r_shoulder`, `l_hip`, `r_hip`) — there are **zero spine, sternum, ribcage, or belly keypoints**, and depth (`Z`) along the camera lens is discarded because monocular depth is 10× noisier than `(x, y)`.
+- **What fails**: A **dead-on frontal body roll** moves your chest and stomach *toward/away* from the lens (`Z`), producing `< 0.05` 2D `(x, y)` travel — virtually identical to standing idle!
+- **How to make it work reliably**:
+  1. **Turn `35–45°` diagonally** so the head → shoulder → hip → knee S-wave travels horizontally across `X` (`3–4×` stronger 2D signal), **OR**
+  2. **Trace the roll with your hands/elbows** sweeping down chest → waist (creates a huge `0.40+` 2D trajectory!).
+  3. Run `.venv-mac/bin/python -m composer.moves.lab --audit-dataset` right after recording — it automatically flags any move whose `mean_motion_std < 0.065`!
 
 ---
 

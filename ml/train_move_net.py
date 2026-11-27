@@ -37,6 +37,7 @@ from composer.moves.dtw import (
     DEFAULT_WINDOW_FRAMES,
     DEFAULT_WINDOW_SECONDS,
     NULL_CLASSES,
+    estimate_active_duration,
     extract_time_window,
     resample_sequence,
 )
@@ -87,9 +88,9 @@ def _extract_random_window(
     window_seconds: float,
     target_frames: int,
 ) -> tuple[np.ndarray, float]:
-    """Sample a speed-warped (`0.68x..1.32x`) sub-window from a raw clip and return `(window, speed_factor)`."""
+    """Sample a wide speed-warped (`0.55x..1.55x`) sub-window from a raw clip and return `(window, speed_factor)`."""
     arr = np.asarray(features, dtype=np.float32)
-    speed_factor = float(rng.uniform(0.68, 1.32))
+    speed_factor = float(rng.uniform(0.55, 1.55))
 
     if timestamps is not None and len(timestamps) == arr.shape[0]:
         t = np.asarray(timestamps, dtype=np.float64)
@@ -126,23 +127,31 @@ def augment_clip(
         seq, timestamps, rng, window_seconds=window_seconds, target_frames=target_frames
     )
 
-    # 1) Yaw foreshortening (standing slightly turned) & body height/width proportion variance.
-    scale_x = float(rng.uniform(0.76, 1.18))
-    scale_y = float(rng.uniform(0.86, 1.14))
+    # 1) Motion-amplitude scaling around mean clip posture (smaller casual rep vs big energetic rep!)
+    #    + static posture shift jitter so different resting stances never lock out another dancer.
+    mean_pose = np.mean(out, axis=0, keepdims=True)
+    amp_scale = float(rng.uniform(0.65, 1.40))
+    posture_shift = rng.normal(0.0, 0.045, size=(1, out.shape[1])).astype(np.float32)
+    posture_shift[:, 12:18] = 0.0
+    out = mean_pose + posture_shift + (out - mean_pose) * amp_scale
+
+    # 2) Yaw foreshortening (standing slightly turned) & body height/width proportion variance.
+    scale_x = float(rng.uniform(0.74, 1.20))
+    scale_y = float(rng.uniform(0.84, 1.16))
     for x_col, y_col in _XY_PAIRS:
         out[:, x_col] *= scale_x
         out[:, y_col] *= scale_y
 
-    # 2) Independent arm-length proportion scaling around shoulders (short-armed vs long-armed performers).
-    arm_scale = float(rng.uniform(0.84, 1.18))
+    # 3) Independent arm-length proportion scaling around shoulders (short-armed vs long-armed performers).
+    arm_scale = float(rng.uniform(0.82, 1.20))
     for sh_x, sh_y, el_x, el_y, wr_x, wr_y in ((0, 1, 4, 5, 8, 9), (2, 3, 6, 7, 10, 11)):
         out[:, el_x] = out[:, sh_x] + (out[:, el_x] - out[:, sh_x]) * arm_scale
         out[:, el_y] = out[:, sh_y] + (out[:, el_y] - out[:, sh_y]) * arm_scale
         out[:, wr_x] = out[:, sh_x] + (out[:, wr_x] - out[:, sh_x]) * arm_scale
         out[:, wr_y] = out[:, sh_y] + (out[:, wr_y] - out[:, sh_y]) * arm_scale
 
-    # 3) Consistent wrist velocity rescaling after spatial + temporal speed warp.
-    vel_gain = arm_scale / max(speed_factor, 0.5)
+    # 4) Consistent wrist velocity rescaling after amplitude + spatial + temporal speed warp.
+    vel_gain = (amp_scale * arm_scale) / max(speed_factor, 0.45)
     out[:, 12:16] = np.clip(out[:, 12:16] * vel_gain, -2.0, 2.0)
 
     # 4) 2D Camera roll / tilt (±10 deg) rotated consistently across all joints & velocities.
@@ -171,17 +180,20 @@ def load_dataset_split(
     data_dir: Path,
     *,
     window_frames: int = DEFAULT_WINDOW_FRAMES,
-    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    aug_per_clip: int = 20,
+    window_seconds: float | None = None,
+    aug_per_clip: int = 24,
     val_ratio: float = 0.20,
     seed: int = 7,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], float]:
     """Load `datasets/moves/<label>/*.npz` with STRICT clip-level train/val split BEFORE augmentation!
 
-    Returns `(x_train, y_train, x_val, y_val, classes)`. Validation contains ONLY unseen raw clips.
+    Auto-adapts `window_seconds` from the recorded clips' active duration when `window_seconds is None`,
+    and warns if any move class has very low 2D visibility (`mean_std < 0.065`, e.g. frontal body roll).
+    Returns `(x_train, y_train, x_val, y_val, classes, effective_window_seconds)`.
     """
     rng = np.random.default_rng(seed)
     raw_by_class: dict[str, list[tuple[np.ndarray, np.ndarray | None]]] = {}
+    active_durs: list[float] = []
     for move_dir in sorted(Path(data_dir).iterdir()):
         if not move_dir.is_dir():
             continue
@@ -194,14 +206,33 @@ def load_dataset_split(
                 ts = np.asarray(data['timestamps'], dtype=np.float64) if 'timestamps' in data else None
                 if feats.ndim == 2 and feats.shape[0] >= 4 and feats.shape[1] == FEATURE_DIM:
                     raw_by_class.setdefault(label, []).append((feats, ts))
+                    if label.lower() not in NULL_CLASSES:
+                        active_durs.append(estimate_active_duration(feats, ts))
 
     if len(raw_by_class) < 2:
         raise ValueError(f'Need at least 2 move folders with .npz clips inside {data_dir}')
+
+    eff_win_s = float(window_seconds) if window_seconds is not None else (
+        float(np.median(active_durs)) if active_durs else DEFAULT_WINDOW_SECONDS
+    )
 
     classes = sorted(raw_by_class.keys())
     cls_to_idx = {c: i for i, c in enumerate(classes)}
     if not any(c.lower() in NULL_CLASSES for c in classes):
         print('WARNING: No `idle_random` negative class found! Record `idle_random` clips to avoid false triggers.', flush=True)
+
+    for cls_name in classes:
+        if cls_name.lower() in NULL_CLASSES:
+            continue
+        mean_motion = float(np.mean([np.mean(np.std(f, axis=0)) for f, _ in raw_by_class[cls_name]]))
+        if mean_motion < 0.065:
+            print(
+                f'WARNING: Move "{cls_name}" has very small 2D keypoint motion (mean_std={mean_motion:.3f}). '
+                f'Moves along camera depth (like a dead-on frontal body roll) look nearly identical to idle '
+                f'because 2D pose has no spine/chest-depth points — try performing it at a 35-45 deg side angle '
+                f'or involving arms/elbows!',
+                flush=True,
+            )
 
     train_raw: dict[str, list[tuple[np.ndarray, np.ndarray | None]]] = {c: [] for c in classes}
     val_raw: dict[str, list[tuple[np.ndarray, np.ndarray | None]]] = {c: [] for c in classes}
@@ -217,14 +248,14 @@ def load_dataset_split(
             else:
                 train_raw[cls_name].append(clips[int(idx)])
 
-    # Build clean unseen validation set (exact true-speed `window_seconds` peak-motion slice).
+    # Build clean unseen validation set (exact true-speed `eff_win_s` peak-motion slice).
     x_val_list: list[np.ndarray] = []
     y_val_list: list[int] = []
     for cls_name in classes:
         for feats, ts in val_raw[cls_name]:
             is_null = cls_name.lower() in NULL_CLASSES
             win = extract_time_window(
-                feats, ts, window_seconds=window_seconds, target_frames=window_frames, center_on_peak=not is_null
+                feats, ts, window_seconds=eff_win_s, target_frames=window_frames, center_on_peak=not is_null
             )
             x_val_list.append(win)
             y_val_list.append(cls_to_idx[cls_name])
@@ -240,13 +271,13 @@ def load_dataset_split(
 
         for feats, ts in train_raw[cls_name]:
             base_win = extract_time_window(
-                feats, ts, window_seconds=window_seconds, target_frames=window_frames, center_on_peak=not is_null
+                feats, ts, window_seconds=eff_win_s, target_frames=window_frames, center_on_peak=not is_null
             )
             x_tr_list.append(base_win)
             y_tr_list.append(c_idx)
             for _ in range(aug_per_clip):
                 x_tr_list.append(
-                    augment_clip(feats, rng, timestamps=ts, window_seconds=window_seconds, target_frames=window_frames)
+                    augment_clip(feats, rng, timestamps=ts, window_seconds=eff_win_s, target_frames=window_frames)
                 )
                 y_tr_list.append(c_idx)
 
@@ -257,7 +288,7 @@ def load_dataset_split(
                 y_tr_list.append(m_idx)
                 for _ in range(max(4, aug_per_clip // 2)):
                     x_tr_list.append(
-                        augment_clip(m_feats, rng, timestamps=ts, window_seconds=window_seconds, target_frames=window_frames)
+                        augment_clip(m_feats, rng, timestamps=ts, window_seconds=eff_win_s, target_frames=window_frames)
                     )
                     y_tr_list.append(m_idx)
 
@@ -268,7 +299,7 @@ def load_dataset_split(
 
     x_val = np.stack(x_val_list, axis=0).astype(np.float32) if x_val_list else x_train[:1]
     y_val = np.array(y_val_list, dtype=np.int32) if y_val_list else y_train[:1]
-    return x_train, y_train, x_val, y_val, classes
+    return x_train, y_train, x_val, y_val, classes, eff_win_s
 
 
 def generate_synthetic_dataset(
@@ -417,17 +448,18 @@ def export_to_numpy_npz(
 def train_and_export(args) -> dict:
     import keras
 
-    window_seconds = float(getattr(args, 'window_seconds', DEFAULT_WINDOW_SECONDS))
+    req_win_s = getattr(args, 'window_seconds', None)
     if args.demo_synthetic:
+        window_seconds = float(req_win_s if req_win_s is not None else DEFAULT_WINDOW_SECONDS)
         x_all, y_all, classes = generate_synthetic_dataset(window_frames=args.window_frames, seed=args.seed)
         split = max(1, int(0.8 * len(y_all)))
         x_train, y_train = x_all[:split], y_all[:split]
         x_val, y_val = x_all[split:], y_all[split:]
     else:
-        x_train, y_train, x_val, y_val, classes = load_dataset_split(
+        x_train, y_train, x_val, y_val, classes, window_seconds = load_dataset_split(
             args.data,
             window_frames=args.window_frames,
-            window_seconds=window_seconds,
+            window_seconds=req_win_s,
             aug_per_clip=args.aug_per_clip,
             seed=args.seed,
         )
@@ -585,8 +617,9 @@ def main():
     p.add_argument('--export-tflite-int8', type=Path, default=None,
                    help='Optional full-integer INT8 .tflite export (calibrated for STM32MP257 NPU / stedgeai)')
     p.add_argument('--window-frames', type=int, default=DEFAULT_WINDOW_FRAMES)
-    p.add_argument('--window-seconds', type=float, default=DEFAULT_WINDOW_SECONDS)
-    p.add_argument('--aug-per-clip', type=int, default=20)
+    p.add_argument('--window-seconds', type=float, default=None,
+                   help='Window seconds (default: auto-detected from recorded clips median active duration)')
+    p.add_argument('--aug-per-clip', type=int, default=24)
     p.add_argument('--epochs', type=int, default=35)
     p.add_argument('--batch-size', type=int, default=32)
     p.add_argument('--lr', type=float, default=1.5e-3)

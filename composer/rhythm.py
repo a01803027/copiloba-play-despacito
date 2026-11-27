@@ -73,15 +73,18 @@ class MultiSourceTempoTracker:
             return self.bpm, self.confidence
 
         hip_s, head_s, arm_s, sh_s, leg_s = self._resample(timestamp, n_grid)
+        # Lower body (`legs` + `hip`) gets master tempo priority so expressive arm flourishes
+        # never pull the beat away from active footwork.
         candidates = (
-            ('legs', leg_s, 0.03),
-            ('hip', hip_s, 0.0025),
-            ('head', head_s, 0.0025),
-            ('shoulders', sh_s, 0.05),
-            ('arms', arm_s, 0.08),
+            ('legs', leg_s, 0.025, 1.20),
+            ('hip', hip_s, 0.0025, 1.12),
+            ('head', head_s, 0.0025, 1.00),
+            ('shoulders', sh_s, 0.05, 0.96),
+            ('arms', arm_s, 0.08, 0.85),
         )
 
-        best_score = 0.0
+        best_weighted = 0.0
+        best_raw_score = 0.0
         best_bpm = self.bpm
         best_src = 'none'
         # Evaluate lags covering 60..165 BPM at 30 Hz (lag = 1800 / bpm => 11..30).
@@ -90,18 +93,20 @@ class MultiSourceTempoTracker:
         if max_lag <= min_lag + 2:
             return self.bpm, self.confidence
 
-        for name, series, min_std in candidates:
+        for name, series, min_std, prio_w in candidates:
             bpm_est, score = self._autocorr_bpm(series, min_lag, max_lag, min_std, bpm_min, bpm_max)
-            if score > best_score:
-                best_score = score
+            weighted = score * prio_w
+            if score >= 0.36 and weighted > best_weighted:
+                best_weighted = weighted
+                best_raw_score = score
                 best_bpm = bpm_est
                 best_src = name
 
-        if best_score >= 0.36:
+        if best_raw_score >= 0.36:
             # Smooth PLL lock: faster adaptation when confidence is high.
-            alpha = 0.24 + 0.30 * _clamp((best_score - 0.36) / 0.5, 0.0, 1.0)
+            alpha = 0.24 + 0.30 * _clamp((best_raw_score - 0.36) / 0.5, 0.0, 1.0)
             self.bpm = _clamp(self.bpm + alpha * (best_bpm - self.bpm), bpm_min, bpm_max)
-            self.confidence = _clamp(best_score, 0.0, 1.0)
+            self.confidence = _clamp(best_raw_score, 0.0, 1.0)
             self.source = best_src
         else:
             self.confidence *= 0.91

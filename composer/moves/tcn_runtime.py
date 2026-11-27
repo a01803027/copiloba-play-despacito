@@ -102,12 +102,13 @@ class TemporalMoveClassifier:
         model: NumpyTcnModel,
         *,
         window_seconds: float | None = None,
-        enter_threshold: float = 0.78,
-        exit_threshold: float = 0.45,
-        ema_alpha: float = 0.45,
+        enter_threshold: float = 0.68,
+        exit_threshold: float = 0.40,
+        ema_alpha: float = 0.50,
         cooldown_s: float = 0.85,
         eval_stride: int = 2,
         min_motion_std: float = 0.025,
+        multi_scale: bool = True,
     ):
         self.model = model
         self.window_seconds = float(window_seconds if window_seconds is not None else model.window_seconds)
@@ -117,6 +118,7 @@ class TemporalMoveClassifier:
         self.cooldown_s = cooldown_s
         self.eval_stride = max(1, eval_stride)
         self.min_motion_std = min_motion_std
+        self.multi_scale = multi_scale
         self.reset()
 
     @classmethod
@@ -124,12 +126,22 @@ class TemporalMoveClassifier:
         return cls(NumpyTcnModel.load(npz_path), **kwargs)
 
     def reset(self):
-        self._buf: deque[tuple[float, tuple[float, ...]]] = deque(maxlen=150)
+        self._buf: deque[tuple[float, tuple[float, ...]]] = deque(maxlen=180)
         self._ema = np.zeros(len(self.model.classes), dtype=np.float32)
         self._active: dict[str, bool] = {c: False for c in self.model.classes}
         self._cooldowns: dict[str, float] = {}
         self._frame_count = 0
         self.last_probs: dict[str, float] = {c: 0.0 for c in self.model.classes}
+        self.last_raw_probs: dict[str, float] = {c: 0.0 for c in self.model.classes}
+
+    def _window_for_span(self, timestamp: float, span_s: float) -> np.ndarray | None:
+        cutoff = timestamp - span_s
+        win = [item for item in self._buf if item[0] >= cutoff]
+        if len(win) < 6 or (win[-1][0] - win[0][0]) < (0.45 * span_s):
+            return None
+        ts = np.array([w[0] for w in win], dtype=np.float64)
+        feats = np.array([w[1] for w in win], dtype=np.float32)
+        return resample_sequence(feats, ts, target_frames=self.model.window_frames)
 
     def update(self, timestamp: float, feature_vector: tuple[float, ...]) -> list[MoveEvent]:
         self._buf.append((timestamp, feature_vector))
@@ -137,24 +149,28 @@ class TemporalMoveClassifier:
         if self._frame_count % self.eval_stride != 0:
             return []
 
-        cutoff = timestamp - self.window_seconds
-        win = [item for item in self._buf if item[0] >= cutoff]
-        if len(win) < 8 or (win[-1][0] - win[0][0]) < (0.45 * self.window_seconds):
+        window = self._window_for_span(timestamp, self.window_seconds)
+        if window is None:
             return []
 
-        ts = np.array([w[0] for w in win], dtype=np.float64)
-        feats = np.array([w[1] for w in win], dtype=np.float32)
-        window = resample_sequence(feats, ts, target_frames=self.model.window_frames)
-
-        # Motion-energy gate: if the dancer is standing still, decay probabilities cleanly (prevents OOD drift!).
-        if float(np.mean(np.std(window, axis=0))) < self.min_motion_std:
+        # Motion-energy gate: if no joint is actually moving (`max_std < 0.055`), decay probabilities cleanly.
+        if float(np.max(np.std(window, axis=0))) < max(self.min_motion_std, 0.055):
             self._ema *= (1.0 - self.ema_alpha)
             self.last_probs = {cls_name: float(self._ema[i]) for i, cls_name in enumerate(self.model.classes)}
             for cls_name in self._active:
                 self._active[cls_name] = False
             return []
 
-        probs = self.model.predict_proba(window)
+        # Multi-scale time invariance: evaluate nominal speed (1.0x) + faster (0.72x) + slower (1.32x) windows!
+        scales = (0.72, 1.0, 1.32) if self.multi_scale else (1.0,)
+        prob_candidates = []
+        for sc in scales:
+            w_sc = window if sc == 1.0 else self._window_for_span(timestamp, self.window_seconds * sc)
+            if w_sc is not None:
+                prob_candidates.append(self.model.predict_proba(w_sc))
+        probs = np.max(np.stack(prob_candidates, axis=0), axis=0) if len(prob_candidates) > 1 else prob_candidates[0]
+
+        self.last_raw_probs = {cls_name: float(probs[i]) for i, cls_name in enumerate(self.model.classes)}
         self._ema = self.ema_alpha * probs + (1.0 - self.ema_alpha) * self._ema
         self.last_probs = {cls_name: float(self._ema[i]) for i, cls_name in enumerate(self.model.classes)}
 

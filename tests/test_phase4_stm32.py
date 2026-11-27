@@ -52,12 +52,28 @@ class Phase4AudioAndStm32Tests(unittest.TestCase):
         c_up = brain.controls(Features(energy=0.5, soundwave_rise=1.0))
         self.assertLess(c_up['resonance'] - c_down['resonance'], 0.25)
 
-    def test_custom_tier2_dance_move_emits_musical_harmonic_bloom(self):
+    def test_custom_tier2_dance_move_shifts_groove_and_section_for_next_bars(self):
         brain = Composer(seed=7, genre='house')
-        brain.update(Features(energy=0.5), 0, 0.0)
-        evs = brain.update(Features(energy=0.6, moves=(MoveEvent('BODY_ROLL', 'both', 0.92),)), 9600, 0.2)
-        lead_ons = [e for e in evs if e.kind == 0 and e.limb == 1]
-        self.assertGreaterEqual(len(lead_ons), 4)
+        brain.update(Features(energy=0.18, legs_visible=True, leg_energy=0.02), 0, 0.0)
+        self.assertFalse(brain.custom_groove_active)
+
+        # Triggering a custom Tier 2 move (e.g. KAKAKA / BODY_ROLL) engages a 3-bar groove & section shift!
+        evs = brain.update(
+            Features(energy=0.30, legs_visible=True, leg_energy=0.10, moves=(MoveEvent('BODY_ROLL', 'both', 0.92),)),
+            9600,
+            0.2,
+        )
+        self.assertTrue(brain.custom_groove_active)
+        self.assertGreaterEqual(brain.custom_groove_bars_remaining, 2.5)
+        self.assertIn(brain.section, ('CHORUS', 'DROP'))
+        # Emits quantized transition chord + shimmer open-hat (46), NOT cluttered unquantized lead SFX!
+        self.assertTrue(any(e.kind == 0 and e.limb == 3 and e.note == 46 for e in evs))
+        self.assertTrue(any(e.kind == 0 and e.limb == 0 for e in evs))
+
+        # Advance 3+ full bars (>48 sixteenth-note ticks) and confirm custom groove expires cleanly.
+        for step in range(1, 70):
+            brain.update(Features(energy=0.20, legs_visible=True, leg_energy=0.05), 9600 + step * 6000, 0.2 + step * 0.125)
+        self.assertFalse(brain.custom_groove_active)
 
     def test_stm32_coco17_npu_adapter_feeds_cleanly_into_feature_extractor(self):
         # Construct realistic standing COCO-17 keypoints in (y, x, score) MoveNet format.

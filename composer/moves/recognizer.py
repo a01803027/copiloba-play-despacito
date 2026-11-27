@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import math
+from typing import Iterable
 from ..kinematics.filters import clamp
 from .arbiter import MoveArbiter
 
@@ -63,6 +64,8 @@ class BodyMoveRecognizer:
         self._squat_armed = False
         self._squat_held = 0.0
         self._knee_armed = [False, False]
+        self._step_armed = [False, False]
+        self._step_peak_lift = [0.0, 0.0]
         self._last_label = ''
         self._last_label_until = -1e9
 
@@ -110,6 +113,8 @@ class BodyMoveRecognizer:
         left_reach_vel: float = 0.0,
         right_reach_vel: float = 0.0,
         glitch_joints: tuple[str, ...] = (),
+        extra_candidates: Iterable[MoveEvent] = (),
+        tier2_confidence: float = 0.0,
     ) -> MoveSnapshot:
         clamped_dt = min(max(dt, 1e-3), 0.2)
         sample = {
@@ -145,27 +150,31 @@ class BodyMoveRecognizer:
         win_wave = recent(0.95)
         win_long = recent(1.20)
 
-        # --- 1) HARD_PUNCH (Left / Right) — Fast 2D Outward Wrist-Thrust Impulse + Combo Re-arm ---
-        # Supports rapid sequential 1-2-1-2 boxing combos (0.18s refractory) while mathematically
-        # rejecting smooth sinusoidal arm waving (where shoulder->wrist reach stays ~constant!).
+        # --- 1) TWO-TIER PUNCHES: LIGHT_PUNCH (Groove Jab) vs. HARD_PUNCH (Exaggerated Power Punch) ---
+        # Casual arm swings below `rvel < 2.85` / `spd < 3.80` stay in the deadzone (zero spam!).
+        # Bilateral symmetric swings (OPEN_BURST / DOUBLE_ARM_RISE / OVERHEAD_DROP) are rejected immediately.
+        both_plunging = (left_vy <= -2.2 and right_vy <= -2.2)
+        both_thrusting_sym = (left_reach_vel >= 1.85 and right_reach_vel >= 1.85)
+        both_rising_sym = (left_vy >= 1.45 and right_vy >= 1.45 and abs(left_vy - right_vy) < 1.15)
+        bilateral_motion = both_plunging or both_thrusting_sym or both_rising_sym
+
         for side_idx, side_name, active, bend_k, spd_k, rvel_k, reach_k, decel in (
             (0, 'left', arms_active[0], 'lbend', 'lspd', 'lrvel', 'lreach', left_decel),
             (1, 'right', arms_active[1], 'rbend', 'rspd', 'rrvel', 'rreach', right_decel),
         ):
             rvel = sample[rvel_k]
-            cur_spd = sample[spd_k]
             cur_bend = sample[bend_k]
 
-            # Re-arm immediately once the thrust peaks/retracts (rvel drops < 0.7) OR after 0.26s.
+            # Re-arm once outward thrust peaks/retracts (rvel < 0.70) OR after 0.28s.
             if not self._punch_rearmed[side_idx]:
-                if rvel < 0.70 or self._ready(f'punch_{side_name}', timestamp, 0.26):
+                if rvel < 0.70 or self._ready(f'punch_any_{side_name}', timestamp, 0.28):
                     self._punch_rearmed[side_idx] = True
 
             if (
                 active
+                and not bilateral_motion
                 and self._punch_rearmed[side_idx]
                 and len(win_fast) >= 2
-                and self._ready(f'punch_{side_name}', timestamp, 0.18)
             ):
                 max_prev_bend = max(s[bend_k] for s in win_fast[:-1])
                 min_prev_reach = min(s[reach_k] for s in win_fast[:-1])
@@ -174,26 +183,35 @@ class BodyMoveRecognizer:
                 peak_spd = max(s[spd_k] for s in win_fast[-2:])
                 peak_rvel = max(s[rvel_k] for s in win_fast[-2:])
 
-                # Path A: Outward thrust impulse (fires right on impact, even before full elbow lockout!).
-                outward_thrust = (
-                    peak_rvel >= 2.20
-                    and peak_spd >= 3.20
-                    and (bend_drop >= 0.10 or reach_gain >= 0.14 or cur_bend <= 0.42)
+                # Tier B (Heavy): Exaggerated, unmistakable full-power punch.
+                heavy_thrust = (
+                    peak_rvel >= 4.60
+                    and peak_spd >= 5.20
+                    and (bend_drop >= 0.15 or reach_gain >= 0.22 or cur_bend <= 0.36)
                 )
-                # Path B: Crisp straight/semi-bent jab or camera-forward punch with high speed + snap stop.
-                fast_combo_jab = (
-                    peak_spd >= 4.40
-                    and peak_rvel >= 1.50
-                    and (bend_drop >= 0.08 or decel <= -28.0)
+                heavy_snap = (
+                    peak_spd >= 6.20
+                    and peak_rvel >= 3.60
+                    and (bend_drop >= 0.12 or decel <= -35.0)
                 )
-                # Reject simultaneous downward overhead slam (both arms plunging fast together).
-                both_plunging = (left_vy <= -2.2 and right_vy <= -2.2)
+                # Tier A (Light): Moderate rhythmic jab -> subtle in-pocket percussion accent (no loud stab!).
+                light_jab = (
+                    peak_rvel >= 2.85
+                    and peak_spd >= 3.80
+                    and (bend_drop >= 0.12 or reach_gain >= 0.16)
+                )
 
-                if (outward_thrust or fast_combo_jab) and not both_plunging:
-                    strength = clamp((max(peak_spd, peak_rvel) - 2.6) / 4.2, 0.65, 1.0)
+                if (heavy_thrust or heavy_snap) and self._ready(f'punch_heavy_{side_name}', timestamp, 0.26):
+                    strength = clamp((max(peak_spd, peak_rvel) - 4.5) / 4.5, 0.75, 1.0)
                     tag = 'RIGHT POWER PUNCH!' if side_name == 'right' else 'LEFT SUB BOOM!'
                     self._punch_rearmed[side_idx] = False
-                    self._fire(events, f'punch_{side_name}', timestamp, MoveEvent('HARD_PUNCH', side_name, strength), tag, 0.45)
+                    self._cooldowns[f'punch_any_{side_name}'] = timestamp
+                    self._fire(events, f'punch_heavy_{side_name}', timestamp, MoveEvent('HARD_PUNCH', side_name, strength), tag, 0.45)
+                elif light_jab and self._ready(f'punch_any_{side_name}', timestamp, 0.28):
+                    strength = clamp((peak_rvel - 2.6) / 2.6, 0.40, 0.72)
+                    tag = 'RIGHT LIGHT JAB' if side_name == 'right' else 'LEFT LIGHT JAB'
+                    self._punch_rearmed[side_idx] = False
+                    self._fire(events, f'punch_any_{side_name}', timestamp, MoveEvent('LIGHT_PUNCH', side_name, strength), tag, 0.32)
 
         # --- 2) DOUBLE_ARM_RISE (Continuous Rising Soundwave Swell) ---
         both_ok = arms_active[0] and arms_active[1]
@@ -258,8 +276,9 @@ class BodyMoveRecognizer:
 
         # --- 7) BODY_FREEZE (Sudden stop after active dancing -> Dramatic Echo Freeze!) ---
         peak_recent_energy = max((s['energy'] for s in win_long), default=0.0)
+        peak_recent_speed = max((s['speed'] for s in win_long), default=0.0)
         if not self._body_frozen:
-            if peak_recent_energy >= 0.44 and speed < 0.36:
+            if (peak_recent_energy >= 0.35 or peak_recent_speed >= 2.20) and speed < 0.36:
                 self._freeze_held += clamped_dt
                 if self._freeze_held >= 0.28 and self._ready('freeze', timestamp, 1.20):
                     self._body_frozen = True
@@ -273,31 +292,57 @@ class BodyMoveRecognizer:
 
         # --- 8) SIDE_STEP_GROOVE (Periodic side-to-side hip sway & bounce -> Groove Lock) ---
         sway_span = (max(s['sway'] for s in win_long) - min(s['sway'] for s in win_long)) if win_long else 0.0
-        side_step_groove = (not self._body_frozen) and sway_span >= 0.48 and periodicity >= 0.44 and energy >= 0.18
+        side_step_groove = (not self._body_frozen) and sway_span >= 0.42 and periodicity >= 0.40 and energy >= 0.14
 
-        # --- 9) LEG MOVE 1 — KNEE_STOMP (Asymmetric Single-Leg Lift + Crisp Stomp Landing!) ---
-        # Requiring asymmetry (lift - other_lift >= 0.18) eliminates 100% of simultaneous hop/shift false stomps.
+        # --- 9) LEG MOVES — Heavy KNEE_STOMP + Sensitive Rhythmic FOOT_STEP ---
+        # Requiring single-leg asymmetry eliminates 100% of simultaneous hop/camera-shift false triggers.
         if legs_visible:
-            both_lifted_sym = (left_leg_lift >= 0.30 and right_leg_lift >= 0.30 and abs(left_leg_lift - right_leg_lift) < 0.16)
+            both_lifted_sym = (
+                left_leg_lift >= 0.12
+                and right_leg_lift >= 0.12
+                and abs(left_leg_lift - right_leg_lift) < 0.08
+            )
             if both_lifted_sym:
                 self._knee_armed = [False, False]
+                self._step_armed = [False, False]
             else:
                 for side_idx, side_name, lift, other_lift, vy in (
                     (0, 'left', left_leg_lift, right_leg_lift, left_leg_vy),
                     (1, 'right', right_leg_lift, left_leg_lift, right_leg_vy),
                 ):
-                    if lift >= 0.34 and (lift - other_lift) >= 0.18:
+                    # High lift (>= 0.42) upgrades to heavy KNEE_STOMP and cancels light step.
+                    if lift >= 0.42 and (lift - other_lift) >= 0.20:
                         self._knee_armed[side_idx] = True
+                        self._step_armed[side_idx] = False
+                    elif not self._knee_armed[side_idx] and 0.12 <= lift < 0.42 and (lift - other_lift) >= 0.08:
+                        self._step_armed[side_idx] = True
+                        self._step_peak_lift[side_idx] = max(self._step_peak_lift[side_idx], lift)
+
                     if self._knee_armed[side_idx]:
                         landed = lift <= 0.22 or vy <= -1.05
                         if landed and self._ready(f'knee_stomp_{side_name}', timestamp, 0.32):
                             self._knee_armed[side_idx] = False
+                            self._step_armed[side_idx] = False
+                            self._step_peak_lift[side_idx] = 0.0
                             tag = 'RIGHT KNEE KICK!' if side_name == 'right' else 'LEFT KNEE SNARE!'
                             self._fire(events, f'knee_stomp_{side_name}', timestamp, MoveEvent('KNEE_STOMP', side_name, 0.92), tag, 0.55)
-                    elif lift < 0.10:
+                    elif self._step_armed[side_idx]:
+                        pk = self._step_peak_lift[side_idx]
+                        step_landed = lift <= max(0.08, 0.45 * pk) or vy <= -0.45
+                        if step_landed and self._ready(f'foot_step_{side_name}', timestamp, 0.26):
+                            self._step_armed[side_idx] = False
+                            self._step_peak_lift[side_idx] = 0.0
+                            step_str = clamp(0.45 + 1.15 * pk, 0.45, 0.78)
+                            tag = 'RIGHT STEP GROOVE' if side_name == 'right' else 'LEFT STEP GROOVE'
+                            self._fire(events, f'foot_step_{side_name}', timestamp, MoveEvent('FOOT_STEP', side_name, step_str), tag, 0.35)
+                    elif lift < 0.06:
                         self._knee_armed[side_idx] = False
+                        self._step_armed[side_idx] = False
+                        self._step_peak_lift[side_idx] = 0.0
         else:
             self._knee_armed = [False, False]
+            self._step_armed = [False, False]
+            self._step_peak_lift = [0.0, 0.0]
 
         # --- 10) LEG MOVE 2 — SQUAT_DIVE (Deep crouch sub-dive) + SQUAT_RISE (Spring-up pop!) ---
         squat_depth = clamp((0.50 - body_level) / 0.28)
@@ -321,13 +366,15 @@ class BodyMoveRecognizer:
             self._knee_armed = [False, False]
             self._fire(events, 'jump_hit', timestamp, MoveEvent('JUMP_HIT', 'both', strength), 'JUMP AIR HIT!', 0.85)
 
-        # Arbitrate raw candidates (priority, mutual exclusion, and anti-wiggle suppression).
+        # Arbitrate Tier 1 + Tier 2 candidates together (dual-channel priority, spotlight lock & intent shield).
+        combined = events + list(extra_candidates)
         accepted_events = self.arbiter.arbitrate(
-            events,
+            combined,
             timestamp=timestamp,
             glitch_joints=glitch_joints,
             soundwave_rise=soundwave_rise,
             arms_crossed=self._arms_crossed,
+            tier2_confidence=tier2_confidence,
         )
 
         active_label = self._last_label if timestamp < self._last_label_until else (

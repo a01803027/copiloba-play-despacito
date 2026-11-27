@@ -62,6 +62,105 @@ class PoseSanitizerAndArbiterTests(unittest.TestCase):
         self.assertEqual(out3, [])
         self.assertGreaterEqual(arb.suppressed_count, 4)
 
+    def test_dual_channel_spotlight_and_tier2_intent_shield(self):
+        arb = MoveArbiter()
+
+        # 1) Upper-body ARM_WAVE + lower-body FOOT_STEP in same frame -> BOTH pass (independent channels!),
+        #    while a competing upper-body HARD_PUNCH in the same frame is suppressed.
+        out = arb.arbitrate(
+            [
+                MoveEvent('ARM_WAVE', 'lr', 0.90),
+                MoveEvent('HARD_PUNCH', 'right', 0.95),
+                MoveEvent('FOOT_STEP', 'right', 0.65),
+            ],
+            timestamp=10.0,
+        )
+        self.assertEqual([e.kind for e in out], ['ARM_WAVE', 'FOOT_STEP'])
+
+        # 2) Rolling temporal spotlight: 0.30s after ARM_WAVE, trailing HARD_PUNCH / LIGHT_PUNCH is suppressed,
+        #    while OVERHEAD_DROP (higher priority 98 > 82) IS allowed to cut through!
+        self.assertEqual(arb.arbitrate([MoveEvent('HARD_PUNCH', 'left', 0.95)], timestamp=10.30), [])
+        self.assertEqual(
+            [e.kind for e in arb.arbitrate([MoveEvent('OVERHEAD_DROP', 'both', 0.95)], timestamp=10.35)],
+            ['OVERHEAD_DROP'],
+        )
+
+        # 3) Tier 2 Intent Shield: when a custom Tier 2 move is forming (tier2_confidence >= 0.48),
+        #    opportunistic Tier 1 punches and bursts are blocked!
+        out_shield = arb.arbitrate(
+            [MoveEvent('HARD_PUNCH', 'right', 0.92), MoveEvent('OPEN_BURST', 'both', 0.88)],
+            timestamp=15.0,
+            tier2_confidence=0.58,
+        )
+        self.assertEqual(out_shield, [])
+
+    def test_two_tier_light_vs_heavy_punches_and_sparse_feet_drums(self):
+        from composer.brain import Composer
+        from composer.features import Features
+
+        ext = FeatureExtractor()
+        guard_r = ((0.62, 0.50, 0.0), (0.56, 0.42, 0.0))
+        for i in range(6):
+            ext.update(_pose(r_el=guard_r[0], r_wr=guard_r[1]), i / 30.0)
+
+        # Moderate jab (~0.19 dx over 2 frames -> rvel ~ 3.5, below 4.6 heavy threshold) -> LIGHT_PUNCH only!
+        light_seen, heavy_seen = 0, 0
+        for k, (el, wr) in enumerate(
+            (((0.66, 0.46, 0.0), (0.65, 0.40, 0.0)), ((0.69, 0.43, 0.0), (0.75, 0.39, 0.0))),
+            start=6,
+        ):
+            f = ext.update(_pose(r_el=el, r_wr=wr), k / 30.0)
+            light_seen += sum(1 for m in f.moves if m.kind == 'LIGHT_PUNCH')
+            heavy_seen += sum(1 for m in f.moves if m.kind == 'HARD_PUNCH')
+        self.assertGreaterEqual(light_seen, 1)
+        self.assertEqual(heavy_seen, 0)
+
+        # LIGHT_PUNCH in Composer triggers subtle percussion ONLY (zero loud lead synth stabs!).
+        brain = Composer(seed=7, genre='house')
+        brain.update(Features(energy=0.4, legs_visible=True, leg_energy=0.3), 0, 0.0)
+        jab_evs = brain.update(
+            Features(energy=0.4, legs_visible=True, leg_energy=0.3, moves=(MoveEvent('LIGHT_PUNCH', 'right', 0.55),)),
+            1200,
+            0.05,
+        )
+        self.assertEqual([e for e in jab_evs if e.kind == 0 and e.limb == 1], [])
+        self.assertTrue(any(e.kind == 0 and e.limb == 3 and e.note in (42, 46) for e in jab_evs))
+
+        # Sparse drums when feet stay planted (`legs_visible=True, leg_energy=0.0`) vs active footwork (`leg_energy=0.75`).
+        sparse_brain = Composer(seed=7, genre='house')
+        footwork_brain = Composer(seed=7, genre='house')
+        sparse_evs, foot_evs = [], []
+        for n in range(180):
+            sparse_evs.extend(
+                sparse_brain.update(
+                    Features(energy=0.45, right_height=0.8, legs_visible=True, leg_energy=0.02),
+                    n * 1600,
+                    n / 30.0,
+                )
+            )
+            foot_evs.extend(
+                footwork_brain.update(
+                    Features(energy=0.65, right_height=0.8, legs_visible=True, leg_energy=0.78),
+                    n * 1600,
+                    n / 30.0,
+                )
+            )
+        sparse_hats_snares = [e for e in sparse_evs if e.kind == 0 and e.limb == 3 and e.note in (38, 42, 46)]
+        foot_hats_snares = [e for e in foot_evs if e.kind == 0 and e.limb == 3 and e.note in (38, 42, 46)]
+        self.assertEqual(sparse_hats_snares, [], 'Planted feet should produce zero busy hi-hats or snares')
+        self.assertGreaterEqual(len(foot_hats_snares), 15, 'Active footwork should unlock full hats and snares')
+
+        # Sensitive FOOT_STEP: gentle single-foot dance step (lift ~0.25 < 0.42 stomp threshold) fires FOOT_STEP!
+        ext_step = FeatureExtractor()
+        for i in range(6):
+            ext_step.update(_pose(l_knee=(0.44, 0.85, 0.0), r_knee=(0.56, 0.85, 0.0)), i / 30.0)
+        steps_seen = []
+        for k, ry in enumerate((0.83, 0.815, 0.815, 0.84, 0.85, 0.85), start=6):
+            f_st = ext_step.update(_pose(l_knee=(0.44, 0.85, 0.0), r_knee=(0.56, ry, 0.0)), k / 30.0)
+            steps_seen.extend(m.kind for m in f_st.moves)
+        self.assertIn('FOOT_STEP', steps_seen)
+        self.assertNotIn('KNEE_STOMP', steps_seen)
+
     def test_rapid_sequential_boxing_combo_registers_every_punch(self):
         ext = FeatureExtractor()
         # Guard stance for 5 frames.

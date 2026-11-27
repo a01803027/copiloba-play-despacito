@@ -162,7 +162,48 @@ python3 -m composer.app \
 
 ---
 
-## Step 7 — Board Troubleshooting Cheat Sheet
+## Step 7 — Connect the ESP32 BLE Low Energy Wearable LED Shirt (`CV-DAW-SHIRT`)
+
+The STM32MP257F-DK includes an onboard **Murata LBEE5KL1YN Wi-Fi / Bluetooth Low Energy 5.x** module managed by **BlueZ (`bluetoothd`)** on OpenSTLinux 6.6 Scarthgap. CV-DAW talks to the ESP32 LED shirt over **BLE Nordic UART Service (`NUS`)** on an isolated daemon thread (`<= 20`-byte `WriteWithoutResponse` packets, zero pairing dialog, zero impact on the 60 Hz audio/vision loop).
+
+### 7.1 Enable BLE & Install `bleak` on OpenSTLinux 6.6 Scarthgap
+```bash
+# 1. Ensure the onboard Bluetooth controller is up and powered on:
+systemctl start bluetooth
+bluetoothctl power on
+
+# 2. Install bleak (pure-Python BlueZ D-Bus client):
+python3 -m pip install --break-system-packages bleak
+```
+
+### 7.2 Calibrate Physical Shirt Strip Segments Over BLE (No Reflash Needed)
+Power on the ESP32 DevKit (`wearable_esp32/playera_led_esp32/playera_led_esp32.ino`, advertising as `CV-DAW-SHIRT`) and verify the **Left Arm (Red) → Chest (Green) → Right Arm (Blue)** pixel boundaries:
+```bash
+cd ~/cv-daw
+python3 -m composer.wearable.cli --mode ble --leds 25,10,25 --test-segments
+python3 -m composer.wearable.cli --mode ble --leds 25,10,25 --demo
+```
+
+### 7.3 Launch Full Live CV-DAW + NPU Pose + ALSA Audio + BLE LED Shirt
+Simply append `--wearable ble --wearable-leds <left>,<chest>,<right>` to your launch command:
+```bash
+python3 -m composer.app \
+  --mode camera \
+  --pose-backend stai-npu \
+  --gstreamer "v4l2src device=/dev/video0 ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! appsink drop=true max-buffers=1" \
+  --style house \
+  --launch-engine \
+  --alsa-device plughw:0,0 \
+  --period-frames 256 \
+  --alsa-periods 3 \
+  --wearable ble \
+  --wearable-leds 25,10,25 \
+  --no-window
+```
+
+---
+
+## Step 8 — Board Troubleshooting Cheat Sheet
 
 | Issue on STM32MP257F-DK | Fix |
 | :--- | :--- |
@@ -171,3 +212,4 @@ python3 -m composer.app \
 | Camera won't open with `--camera 0` | Check `ls /dev/video*` (STM32 DCMIPP/CSI pipelines often live on `/dev/video0` or `/dev/video1` and require `--gstreamer "v4l2src device=/dev/videoX ! ... ! appsink drop=true max-buffers=1"`). |
 | Low MoveNet detection rate in dim room | Improve frontal lighting or lower `min_valid_score` in `StaiMpuPoseTracker` (default `0.28`). |
 | Audio underruns (`xruns > 0`) | Use `--period-frames 256 --alsa-periods 3`, verify Core 1 `SCHED_FIFO` limits, and confirm `CV_DAW_VOICES_PER_LIMB=8` in the `audio-ready` startup line. |
+| BLE shirt `CV-DAW-SHIRT` not found | Run `bluetoothctl power on` and `bluetoothctl scan le` to confirm `CV-DAW-SHIRT` is advertising; if `hci0` is down on STM32MP257F-DK, run `rfkill unblock bluetooth && hciconfig hci0 up`. |

@@ -19,6 +19,7 @@ from .recorder import SessionRecorder
 from .styles import STYLE_ORDER
 from .ui import draw_hud, handle_window_key
 from .vision import AsyncPoseWorker, LatestCamera, create_pose_backend
+from .wearable import DEFAULT_DEVICE_NAME, create_shirt_orchestrator
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -128,6 +129,16 @@ def _build_parser():
     p.add_argument('--diagnose-dir', type=Path, default=ROOT / 'artifacts')
     p.add_argument('--no-window', action='store_true')
     p.add_argument('--metrics', type=Path)
+    p.add_argument('--wearable', choices=('off', 'ble', 'serial', 'mock'), default='off',
+                   help='Sincroniza playera LED ESP32 (ble = BLE Low Energy NUS, serial = USB, mock = consola)')
+    p.add_argument('--wearable-name', default=DEFAULT_DEVICE_NAME,
+                   help=f'Nombre BLE del ESP32 (por defecto: {DEFAULT_DEVICE_NAME})')
+    p.add_argument('--wearable-addr', default=None, help='Dirección MAC/UUID BLE explícita opcional')
+    p.add_argument('--wearable-port', default=None, help='Puerto USB Serial para --wearable serial')
+    p.add_argument('--wearable-leds', default='25,10,25',
+                   help='Conteo de LEDs brazo_izq,pecho,brazo_der (por defecto: 25,10,25)')
+    p.add_argument('--wearable-no-reverse-left', action='store_true',
+                   help='Desactiva la inversión hombro->muñeca del brazo izquierdo')
     return p
 
 
@@ -160,7 +171,7 @@ def main():
     if (args.record or args.offline_audio) and not args.launch_engine:
         parser.error('--record y --offline-audio requieren --launch-engine')
 
-    process = bridge = capture = detector = pose_worker = recorder = cv2 = None
+    process = bridge = capture = detector = pose_worker = recorder = shirt = cv2 = None
     started = time.monotonic()
     frames = tracked_frames = notes = 0
     max_loop = 0.0
@@ -209,6 +220,21 @@ def main():
             video_fps = capture.get(cv2.CAP_PROP_FPS) if args.mode == 'video' else 60
             if not video_fps or video_fps < 1:
                 video_fps = 30
+
+        if args.wearable != 'off':
+            shirt = create_shirt_orchestrator(
+                args.wearable,
+                leds_spec=args.wearable_leds,
+                reverse_left=not args.wearable_no_reverse_left,
+                device_name=args.wearable_name,
+                address=args.wearable_addr,
+                serial_port=args.wearable_port,
+            )
+            print(
+                f'Playera LED activa ({args.wearable.upper()} -> {args.wearable_name}, '
+                f'LEDs={args.wearable_leds})',
+                flush=True,
+            )
 
         if args.launch_engine:
             process = start_engine(args)
@@ -297,6 +323,8 @@ def main():
 
             frame = bridge.metric(0)
             events = composer.update(features, frame, elapsed)
+            if shirt is not None:
+                shirt.update(features, composer)
             ctrl = composer.controls(features)
             bridge.controls(ctrl)
             for event in events:
@@ -344,6 +372,8 @@ def main():
     except KeyboardInterrupt:
         print('Deteniendo compositor...')
     finally:
+        if shirt is not None:
+            shirt.close()
         if recorder is not None:
             recorder.record_footer(report)
             recorder.close()

@@ -21,6 +21,7 @@ import math
 import random
 from .arrangement import PhraseSequencer, SectionController, strum_chord_schedule
 from .features import Features, clamp
+from .moves import is_custom_move
 from .procedural import degree_to_midi, quantize_gesture_frame, voice_lead
 from .styles import REGISTRY, STYLE_ORDER, STYLES, StyleBlueprint, get_style
 
@@ -28,6 +29,7 @@ RATE = 48000
 RISER_MIDI = 120  # Dedicated warm Atmospheric Shimmer Swell voice in C++20 DSP (limb 1)
 KICK_MIN_GAP_FRAMES = int(RATE * 0.19)  # 190 ms arbitration prevents double-flammed kick flooding
 MOVE_HIT_CUSHION_FRAMES = 160           # 3.3 ms immediate response (>128-frame DSP block, zero late cmds)
+CUSTOM_GROOVE_TICKS = 48                # 3 full bars (48 sixteenth notes) of groove/section shift per custom move
 SCALE = (0, 2, 3, 5, 7, 8, 10)
 PROGRESSION = (0, 5, 3, 4)
 
@@ -68,6 +70,10 @@ class Composer:
         self._riser_playing = False
         self._wave_dir = 0          # +1 L->R, -1 R->L
         self._wave_start = -1e9
+        self._lead_duck_until_frame = -1
+        self.custom_groove_until_tick = -1
+        self.custom_groove_flavor = -1
+        self.custom_groove_name = ''
 
         self.prev_chord_notes: tuple[int, ...] = ()
         self.next_frame = None
@@ -127,6 +133,39 @@ class Composer:
         p = self.profile
         return (max(64.0, p.bpm_min - 8.0), min(180.0, p.bpm_max + 12.0))
 
+    @property
+    def custom_groove_active(self) -> bool:
+        return self.tick < self.custom_groove_until_tick
+
+    @property
+    def custom_groove_bars_remaining(self) -> float:
+        return max(0.0, (self.custom_groove_until_tick - self.tick) / 16.0)
+
+    @staticmethod
+    def _lower_body_drive(features: Features) -> float:
+        """Lower-body rhythm drive (`0..1`): dominated by feet, knees, and hips when legs are visible."""
+        if features.legs_visible:
+            return clamp(
+                0.76 * features.leg_energy
+                + 0.24 * abs(features.hip_sway)
+                + (0.28 if features.side_step_groove else 0.0)
+            )
+        return clamp(
+            0.72 * features.energy
+            + 0.28 * abs(features.hip_sway)
+            + 0.18 * features.shoulder_bounce
+            + (0.20 if features.side_step_groove else 0.0)
+        )
+
+    def _is_feet_planted_sparse(self, features: Features, lower_drive: float) -> bool:
+        """True when full-body camera sees stationary legs/hips -> keep drums & bass minimal/sparse!"""
+        return (
+            features.legs_visible
+            and lower_drive < 0.14
+            and not self.custom_groove_active
+            and self.section != 'DROP'
+        )
+
     def controls(self, features: Features):
         """Continuous Studio Macro Automation sculpted by posture & continuous body move states."""
         p = self.profile
@@ -150,6 +189,8 @@ class Composer:
         frozen = features.body_frozen
         rise = features.soundwave_rise
         squat = features.squat_depth
+        antic = getattr(features, 'tier2_anticipation', 0.0)
+        cg_active = self.custom_groove_active
 
         punch = self.strike_punch * math.exp(-max(0.0, self._last_seconds - self.strike_punch_at) / 0.18)
         if punch < 0.01:
@@ -162,44 +203,62 @@ class Composer:
             frac = wave_elapsed / 0.75
             wave_pan_override = self._wave_dir * (-0.85 + 1.70 * frac)
 
-        # Gentle breathing ambient pad stays alive in stillness; full-body macros open the mix smoothly.
-        pad_level = clamp(0.30 + 0.50 * features.energy + 0.12 * features.expansion + 0.12 * rise + (0.10 if in_drop else 0.0))
+        # Gentle breathing ambient pad stays alive in stillness; upper-body macros open chords & lead smoothly.
+        pad_level = clamp(
+            0.30 + 0.50 * features.energy + 0.12 * features.expansion + 0.12 * rise
+            + 0.08 * antic + (0.10 if (in_drop or cg_active) else 0.0)
+        )
         lead_level = clamp(
             (0.14 + 0.56 * clamp(features.energy * 0.80 + 0.35 * features.right_height)) * (0.55 + 0.45 * features.expansion)
-            + 0.24 * punch + 0.24 * rise
+            + 0.24 * punch + 0.24 * rise + 0.10 * antic
         )
 
-        # Dynamic Backing Groove sculpted by core energy, legs/stance, and side-step dance bounce.
-        groove_bonus = 0.18 if features.side_step_groove else 0.0
-        groove_drive = clamp(
-            0.55 * features.energy + 0.35 * (features.leg_energy if features.legs_visible else features.energy)
-            + 0.20 * abs(features.hip_sway) + 0.15 * features.shoulder_bounce + groove_bonus
-        )
+        # Lower-Body Rhythm Engine: legs & feet carry 80% of drum/bass drive when visible!
+        lower_drive = self._lower_body_drive(features)
+        sparse_feet = self._is_feet_planted_sparse(features, lower_drive)
+        if cg_active:
+            groove_drive = clamp(max(0.72, 0.55 * lower_drive + 0.45 * features.energy))
+        elif features.legs_visible:
+            groove_drive = clamp(0.80 * lower_drive + 0.20 * features.energy)
+        else:
+            groove_drive = lower_drive
+
         cut_mult = 0.08 if (choke or frozen) else (0.45 if in_buildup else (1.12 if in_drop else 1.0))
         beat_mult = 1.0 if self.beat_active else 0.08
+        sparse_drum_mult = 0.42 if sparse_feet else 1.0
+        sparse_bass_mult = 0.58 if sparse_feet else 1.0
         # During SQUAT_DIVE, bass rumbles warm & deep while upper frequencies dive underwater!
         bass_squat_boost = 1.0 + 0.24 * squat
-        bass_level = clamp((0.14 + 0.64 * groove_drive + 0.14 * punch) * cut_mult * bass_squat_boost)
-        drum_level = clamp((0.14 + 0.72 * groove_drive + 0.16 * punch) * (0.08 if (choke or frozen) else 1.0) * beat_mult)
+        bass_level = clamp((0.14 + 0.68 * groove_drive + 0.14 * punch) * cut_mult * bass_squat_boost * sparse_bass_mult)
+        drum_level = clamp((0.12 + 0.76 * groove_drive + 0.16 * punch) * (0.08 if (choke or frozen) else 1.0) * beat_mult * sparse_drum_mult)
 
-        # Filter Macros: Left arm sculpts chords, Right arm sculpts lead, Squat dives underwater, Rise sweeps skyward!
+        # Filter Macros: Left arm sculpts chords, Right arm sculpts lead, Tier 2 anticipation breathes upward!
         level_mod = clamp(0.50 + 0.75 * features.body_level, 0.50, 1.12)
         squat_filter = 1.0 - 0.68 * squat  # Deep squat -> warm underwater 32% filter dive!
         shrug_sweep = 1.0 + 0.55 * features.shoulder_lift
+        cg_cut_boost = 550.0 if (cg_active and self.custom_groove_flavor == 0) else 0.0
 
         pad_bright = clamp(0.32 + 0.38 * features.left_height + 0.22 * features.expansion + 0.12 * features.head_pitch)
-        pad_cut = (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright) * level_mod * shrug_sweep * squat_filter + 1400.0 * punch + 950.0 * rise
+        pad_cut = (
+            (p.cutoff_pad_range[0] + (p.cutoff_pad_range[1] - p.cutoff_pad_range[0]) * pad_bright)
+            * level_mod * shrug_sweep * squat_filter
+            + 1400.0 * punch + 950.0 * rise + 650.0 * antic + cg_cut_boost
+        )
         if choke:
             pad_cut = min(pad_cut, 1300.0)
         pad_cut = clamp(pad_cut, 380.0, 10500.0)
 
         lead_bright = clamp(0.35 + 0.42 * features.right_height + 0.15 * features.head_pitch + 0.12 * features.expansion)
-        lead_cut = (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright) * level_mod * shrug_sweep * squat_filter + 3200.0 * punch + 1100.0 * rise
+        lead_cut = (
+            (p.cutoff_lead_range[0] + (p.cutoff_lead_range[1] - p.cutoff_lead_range[0]) * lead_bright)
+            * level_mod * shrug_sweep * squat_filter
+            + 3200.0 * punch + 1100.0 * rise + 850.0 * antic + cg_cut_boost
+        )
         if choke:
             lead_cut = min(lead_cut, 1700.0)
         lead_cut = clamp(lead_cut, 650.0, 13200.0)
 
-        rev_lift = clamp(0.52 * features.fluidity + 0.32 * features.torso_twist + 0.28 * rise + (0.35 if (choke or frozen) else 0.0))
+        rev_lift = clamp(0.52 * features.fluidity + 0.32 * features.torso_twist + 0.28 * rise + 0.15 * antic + (0.35 if (choke or frozen) else 0.0))
         pad_rev = p.reverb_pad_range[0] + (p.reverb_pad_range[1] - p.reverb_pad_range[0]) * rev_lift
         lead_rev = p.reverb_lead_range[0] + (p.reverb_lead_range[1] - p.reverb_lead_range[0]) * rev_lift
 
@@ -208,20 +267,22 @@ class Composer:
             0.60 * features.head_tilt + 0.30 * features.lateral_balance, -0.82, 0.82
         )
         pad_pan = clamp(-0.30 * features.torso_lean - 0.20 * features.head_tilt, -0.45, 0.45)
+        cg_delay = 0.18 if (cg_active and self.custom_groove_flavor == 2) else 0.0
         delay_send = clamp(
-            p.delay_send * (0.50 + 0.35 * features.fluidity) + 0.44 * tilt_mag + 0.18 * rise + (0.38 if frozen else (0.18 if choke else 0.0)),
+            p.delay_send * (0.50 + 0.35 * features.fluidity) + 0.44 * tilt_mag + 0.18 * rise + 0.12 * antic + cg_delay + (0.38 if frozen else (0.18 if choke else 0.0)),
             0.0, 0.86,
         )
 
+        cg_res = 0.24 if (cg_active and self.custom_groove_flavor == 1) else 0.0
         resonance = clamp(
-            p.resonance + 0.90 * features.shoulder_lift + 0.40 * abs(features.torso_lean) + 0.16 * rise + 0.45 * squat + (0.40 if choke else 0.0),
+            p.resonance + 0.90 * features.shoulder_lift + 0.40 * abs(features.torso_lean) + 0.16 * rise + 0.20 * antic + cg_res + 0.45 * squat + (0.40 if choke else 0.0),
             0.65, 2.55,
         )
         lead_bend = clamp((features.right_bend - 0.5) * 0.30 + (1.0 - features.symmetry) * 0.08, -0.35, 0.35)
 
-        sc_drive = clamp(0.35 + 0.55 * features.energy + (0.20 if in_drop else 0.0))
-        stance_boost = max(0.0, features.stance_width - 0.35) if features.legs_visible else 0.0
-        bass_cut = clamp((620.0 + 1600.0 * clamp(groove_drive + 0.35 * stance_boost)) * (1.0 - 0.35 * squat), 300.0, 2900.0)
+        sc_drive = clamp(0.35 + 0.55 * groove_drive + (0.20 if in_drop else 0.0))
+        stance_boost = max(0.0, features.stance_width - 0.30) if features.legs_visible else 0.0
+        bass_cut = clamp((580.0 + 1750.0 * clamp(groove_drive + 0.55 * stance_boost)) * (1.0 - 0.35 * squat), 300.0, 2900.0)
         drum_cut = clamp((8200.0 + 1800.0 * features.body_level + 800.0 * punch) * (1.0 - 0.55 * squat), 2200.0, 10800.0)
 
         return {
@@ -283,6 +344,12 @@ class Composer:
 
     def _choose_chord(self, phrase_index: int):
         p = self.profile
+        if self.custom_groove_active:
+            if self.custom_groove_flavor == 0:
+                return p.bright_chord if phrase_index % 2 == 0 else p.progression[(phrase_index + 1) % len(p.progression)]
+            if self.custom_groove_flavor == 1:
+                return p.tension_chord if phrase_index % 2 == 0 else p.bright_chord
+            return p.progression[(phrase_index + 2) % len(p.progression)]
         if self.context.energy < 0.14:
             return p.progression[0]
         if (self.context.energy > 0.72 and self.context.fluidity < 0.35) or self.context.torso_twist > 0.78:
@@ -330,11 +397,25 @@ class Composer:
             self._riser_playing = False
 
         for mv in features.moves:
-            if mv.kind == 'HARD_PUNCH':
+            if mv.kind == 'LIGHT_PUNCH':
+                # Non-exaggerated Jab -> subtle, beat-quantized pocket percussion accent ONLY (no loud synth stab!).
+                q_jab = quantize_gesture_frame(frame, self.next_frame, interval, early_window_ms=75.0)
+                if mv.side == 'right':
+                    hat_midi = 46 if features.right_height >= 0.65 else 42
+                    events.append(Event(3, 0, hat_midi, clamp(0.32 + 0.22 * mv.intensity, 0.30, 0.52), q_jab))
+                else:
+                    sub_tap = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                    events.extend((
+                        Event(3, 0, 38, clamp(0.24 + 0.16 * mv.intensity, 0.22, 0.38), q_jab),
+                        Event(2, 0, sub_tap, clamp(0.36 + 0.18 * mv.intensity, 0.34, 0.52), q_jab),
+                        Event(2, 1, sub_tap, 0.0, q_jab + int(RATE * 0.15)),
+                    ))
+
+            elif mv.kind == 'HARD_PUNCH':
+                # Exaggerated Power Punch -> Full Octave Power Stab + Snare Crack (R) / 808 Sub Boom + Chord (L)!
                 self.strike_punch = max(self.strike_punch, mv.intensity)
                 self.strike_punch_at = seconds
                 if mv.side == 'right':
-                    # Right Hard Punch: Immediate Octave Power Stab + Crisp Genre Clap/Snare Crack!
                     oct_deg = self._register_zone * len(p.scale)
                     n_root = max(58, min(84, degree_to_midi(self.chord_degree + 4 + oct_deg, p.base_midi, p.scale)))
                     n_oct = min(92, n_root + 12)
@@ -346,7 +427,6 @@ class Composer:
                         Event(3, 0, 38, clamp(0.80 + 0.16 * mv.intensity), hit_frame),
                     ))
                 else:
-                    # Left Hard Punch: Deep 808 Sub-Bass Boom + Warm Low Chord Punch (+ arbitrated Kick, never floods!).
                     sub_note = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
                     chord_hit = max(52, min(78, degree_to_midi(self.chord_degree + 2, p.base_midi, p.scale)))
                     self._try_emit_kick(events, hit_frame, clamp(0.86 + 0.12 * mv.intensity))
@@ -396,6 +476,8 @@ class Composer:
                 self._wave_dir = 1 if mv.side == 'lr' else -1
                 self._wave_start = seconds
                 step = max(3600, int(interval * 0.45))
+                # Duck background sequencer melody while the 6-note wave ripple takes the lead spotlight!
+                self._lead_duck_until_frame = max(self._lead_duck_until_frame, hit_frame + 6 * step)
                 degrees = (0, 2, 4, 6, 8, 11) if mv.side == 'lr' else (11, 8, 6, 4, 2, 0)
                 for idx, deg_off in enumerate(degrees):
                     midi = max(55, min(91, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
@@ -412,6 +494,25 @@ class Composer:
                     Event(1, 0, ring, 0.78, hit_frame),
                     Event(1, 1, ring, 0.0, hit_frame + int(RATE * 0.55)),
                 ))
+
+            elif mv.kind == 'FOOT_STEP':
+                # Sensitive Dance Step -> beat-quantized pocket kick/hat + walking bass pulse!
+                q_step = quantize_gesture_frame(frame, self.next_frame, interval, early_window_ms=80.0)
+                if mv.side == 'right':
+                    sub_walk = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                    self._try_emit_kick(events, q_step, clamp(0.56 + 0.24 * mv.intensity, 0.52, 0.80))
+                    events.extend((
+                        Event(2, 0, sub_walk, clamp(0.52 + 0.22 * mv.intensity, 0.48, 0.76), q_step),
+                        Event(2, 1, sub_walk, 0.0, q_step + int(RATE * 0.22)),
+                    ))
+                else:
+                    hat_note = 46 if features.stance_width >= 0.55 else 42
+                    bass_walk = max(31, min(57, degree_to_midi(self.chord_degree + 4, max(28, p.base_midi - 12), p.scale)))
+                    events.extend((
+                        Event(3, 0, hat_note, clamp(0.38 + 0.24 * mv.intensity, 0.36, 0.62), q_step),
+                        Event(2, 0, bass_walk, clamp(0.46 + 0.22 * mv.intensity, 0.42, 0.70), q_step),
+                        Event(2, 1, bass_walk, 0.0, q_step + int(RATE * 0.20)),
+                    ))
 
             elif mv.kind == 'KNEE_STOMP':
                 self.strike_punch = max(self.strike_punch, 0.80)
@@ -457,18 +558,34 @@ class Composer:
                 ))
                 drop_fired = True
 
-            elif mv.kind != 'ARMS_CROSS_CUT':
-                # Custom Tier 2 (Keras TCN / DTW) dance move -> expressive 4-note harmonic sparkle bloom!
-                self.strike_punch = max(self.strike_punch, 0.72 * mv.intensity)
-                self.strike_punch_at = seconds
-                step = max(3200, int(interval * 0.40))
-                for idx, deg_off in enumerate((0, 4, 7, 11)):
-                    midi = max(58, min(91, degree_to_midi(self.chord_degree + deg_off, p.base_midi, p.scale)))
-                    on_f = hit_frame + idx * step
-                    events.extend((
-                        Event(1, 0, midi, clamp(0.64 + 0.16 * mv.intensity), on_f),
-                        Event(1, 1, midi, 0.0, on_f + int(RATE * 0.36)),
-                    ))
+            elif is_custom_move(mv.kind):
+                # Custom Tier 2 (DTW / Keras TCN) Move -> Shifts the Groove & Section for the next 3 full bars!
+                base_flavor = sum(ord(c) for c in mv.kind) % 3
+                if self.custom_groove_active and self.custom_groove_flavor == base_flavor:
+                    self.custom_groove_flavor = (self.custom_groove_flavor + 1) % 3
+                else:
+                    self.custom_groove_flavor = base_flavor
+                self.custom_groove_name = mv.kind
+                self.custom_groove_until_tick = self.tick + CUSTOM_GROOVE_TICKS
+                self.phrase_number = None  # Force immediate harmonic transition onto the new groove's chord!
+                self.beat_active = True
+
+                # Clean beat-quantized transition accent (shimmer hat + new chord strum, zero cluttered SFX!).
+                q_trans = quantize_gesture_frame(frame, self.next_frame, interval, early_window_ms=90.0)
+                new_chord = self._choose_chord(self.tick // 16)
+                self.current_chord = new_chord
+                self.chord_degree = new_chord.degree
+                self.current_chord_name = new_chord.name
+                trans_notes = voice_lead(
+                    self.prev_chord_notes, self.chord_degree, new_chord.voicing,
+                    p.base_midi, p.scale, left_height=max(0.55, features.left_height),
+                )
+                self.prev_chord_notes = trans_notes
+                for note, vel, on_f, off_f in strum_chord_schedule(trans_notes, q_trans, p.strum_ms, int(RATE * 1.1), 0.68):
+                    events.extend((Event(0, 0, note, vel, on_f), Event(0, 1, note, 0.0, off_f)))
+                events.append(Event(3, 0, 46, clamp(0.58 + 0.20 * mv.intensity), q_trans))
+                if self.custom_groove_flavor == 2:
+                    drop_fired = True
 
         return drop_fired
 
@@ -519,9 +636,13 @@ class Composer:
         self.shoulder_groove_active = features.shoulder_bounce > 0.55 or abs(features.shoulder_tilt) > 0.45
         self.dj_choke_active = features.arms_crossed or features.body_frozen
 
-        # Translate all 11 recognized full-body & leg moves cleanly!
+        # Translate recognized Upper & Lower body moves cleanly!
         drop_fired = self._translate_moves(features, frame, seconds, interval, events)
-        self.section = self.sections.update(live_energy, features, seconds, drop_trigger=drop_fired)
+        lower_drive = self._lower_body_drive(features)
+        section_energy = clamp(0.68 * lower_drive + 0.32 * live_energy) if features.legs_visible else live_energy
+        self.section = self.sections.update(section_energy, features, seconds, drop_trigger=drop_fired)
+        if self.custom_groove_active and self.section not in ('BUILDUP', 'DROP'):
+            self.section = 'DROP' if self.custom_groove_flavor == 2 else 'CHORUS'
 
         if features.shoulder_drop:
             q_drop = quantize_gesture_frame(frame, self.next_frame, interval)
@@ -530,7 +651,7 @@ class Composer:
             self.strike_punch_at = seconds
             self._emit_drop_impact(q_drop, features, events)
 
-        # --- SEQUENCER CLOCK (Dynamic Backing Groove — Clean, Musical, Cohesive) ---
+        # --- SEQUENCER CLOCK (Lower-Body Driven Backing Groove + Custom Multi-Bar Groove Director) ---
         while self.next_frame <= frame + lookahead:
             target = round(self.next_frame)
             slot = self.tick % 16
@@ -538,6 +659,9 @@ class Composer:
             self.bar_in_cycle = bar_idx % 4
             chord_period = 32 if p.key == 'ambient' else 16
             phrase_id = self.tick // chord_period
+            cg_now = self.custom_groove_active
+            cg_flavor = self.custom_groove_flavor if cg_now else -1
+            sparse_feet = self._is_feet_planted_sparse(features, lower_drive)
 
             if self.phrase_number != phrase_id:
                 self.phrase_number = phrase_id
@@ -551,8 +675,13 @@ class Composer:
             swing_amt = int(interval * p.swing * (1.0 + 0.30 * abs(self.fast_context.hip_sway))) if (slot % 2 == 1) else 0
             paused = self.dj_choke_active
 
-            # Layer 0 — Voice-led Warm Chords / Pads with human strum.
-            comp_active = (slot == 0) if (self.section == 'INTRO' or chord_period == 32 or paused) else (slot in p.comping_steps)
+            # Layer 0 — Voice-led Warm Chords / Pads with human strum (Flavor 2 adds deep syncopated comping!).
+            extra_cg_comp = (cg_flavor == 2 and slot == 10)
+            comp_active = (
+                (slot == 0)
+                if (self.section == 'INTRO' or chord_period == 32 or paused)
+                else (slot in p.comping_steps or extra_cg_comp)
+            )
             if comp_active and not features.body_frozen and (self.tick % chord_period == 0 or slot != 0):
                 chord_notes = voice_lead(
                     self.prev_chord_notes, self.chord_degree, self.current_chord.voicing,
@@ -560,20 +689,23 @@ class Composer:
                 )
                 self.prev_chord_notes = chord_notes
                 chord_dur = int(RATE * min(p.chord_duration_s, (interval * chord_period / RATE) * 0.94))
-                chord_vel = 0.42 + 0.28 * live_energy
+                chord_vel = 0.42 + 0.28 * max(live_energy, 0.65 if cg_now else 0.0)
                 for note, vel, on_f, off_f in strum_chord_schedule(chord_notes, target + swing_amt, p.strum_ms, chord_dur, chord_vel):
                     events.extend((Event(0, 0, note, vel, on_f), Event(0, 1, note, 0.0, off_f)))
 
-            # Layer 1 — Stable-Register Cohesive 4-Bar Melody (pauses cleanly during Freeze!).
-            melody_notes = [] if features.body_frozen else PhraseSequencer.notes_at_slot(
+            # Layer 1 — Stable-Register 4-Bar Melody (ducks cleanly during ARM_WAVE so moves never collide!).
+            melody_ducked = features.body_frozen or (target < self._lead_duck_until_frame)
+            eff_bar_cycle = 2 if (cg_flavor == 1) else self.bar_in_cycle
+            eff_reg_zone = min(1, self._register_zone + (1 if cg_flavor == 0 else 0))
+            melody_notes = [] if melody_ducked else PhraseSequencer.notes_at_slot(
                 style=p,
-                bar_in_cycle=self.bar_in_cycle,
+                bar_in_cycle=eff_bar_cycle,
                 slot=slot,
                 chord_degree=self.chord_degree,
                 right_height=features.right_height,
                 section=self.section,
                 head_tilt=features.head_tilt,
-                register_zone=self._register_zone,
+                register_zone=eff_reg_zone,
             )
             for midi, length_steps, vel_scale in melody_notes:
                 vel = clamp((0.32 + 0.34 * max(live_energy, features.right_height * 0.7)) * vel_scale, 0.24, 0.72)
@@ -583,46 +715,80 @@ class Composer:
                     Event(1, 1, midi, 0.0, target + swing_amt + dur_frames),
                 ))
 
-            # Layer 2 — Tight Genre Bassline (SIDE_STEP_GROOVE unlocks rich syncopated octave groove!).
-            if self.section in ('GROOVE', 'CHORUS', 'DROP') and not paused:
-                for b_note in p.bass_pattern:
-                    if b_note.step == slot:
-                        bass_base = max(28, p.base_midi - 12)
-                        oct_lift = 12 if ((self.shoulder_groove_active or features.side_step_groove) and slot >= 8 and slot % 4 != 0) else 0
-                        midi = max(28, min(58, degree_to_midi(self.chord_degree + b_note.degree_offset, bass_base, p.scale) + oct_lift))
-                        bass_e = clamp(0.60 * live_energy + 0.40 * (features.leg_energy if features.legs_visible else live_energy))
-                        vel = clamp(0.42 + 0.38 * bass_e, 0.30, 0.88)
-                        dur_frames = int(max(RATE * 0.12, interval * b_note.length_steps * 0.85))
+            # Layer 2 — Lower-Body-Driven Bassline (minimal root sustain when feet stay planted!).
+            if (self.section in ('GROOVE', 'CHORUS', 'DROP') or cg_now) and not paused:
+                if sparse_feet:
+                    if slot == 0:
+                        bass_root = max(28, min(52, degree_to_midi(self.chord_degree, max(28, p.base_midi - 12), p.scale)))
+                        dur_frames = int(interval * 7.5)
                         events.extend((
-                            Event(2, 0, midi, vel, target + swing_amt),
-                            Event(2, 1, midi, 0.0, target + swing_amt + dur_frames),
+                            Event(2, 0, bass_root, 0.36, target),
+                            Event(2, 1, bass_root, 0.0, target + dur_frames),
                         ))
+                else:
+                    funk_octave = (
+                        self.shoulder_groove_active
+                        or features.side_step_groove
+                        or lower_drive >= 0.45
+                        or cg_flavor == 0
+                    )
+                    for b_note in p.bass_pattern:
+                        if b_note.step == slot:
+                            bass_base = max(28, p.base_midi - 12)
+                            oct_lift = 12 if (funk_octave and slot >= 8 and slot % 4 != 0) else 0
+                            midi = max(28, min(58, degree_to_midi(self.chord_degree + b_note.degree_offset, bass_base, p.scale) + oct_lift))
+                            bass_e = clamp(0.75 * lower_drive + 0.25 * live_energy) if features.legs_visible else live_energy
+                            if cg_now:
+                                bass_e = max(0.68, bass_e)
+                            vel = clamp(0.40 + 0.42 * bass_e, 0.30, 0.88)
+                            dur_frames = int(max(RATE * 0.12, interval * b_note.length_steps * 0.85))
+                            events.extend((
+                                Event(2, 0, midi, vel, target + swing_amt),
+                                Event(2, 1, midi, 0.0, target + swing_amt + dur_frames),
+                            ))
 
-            # Layer 3 — Studio Genre Drum Kit (clean on-grid groove; pauses on X-Cut & Body Freeze!).
+            # Layer 3 — Lower-Body-Driven Drum Kit:
+            #   * Feet planted still (`sparse_feet=True`) -> minimal sparse downbeat pulse ONLY (no hats/snares!).
+            #   * Light footwork (`lower_drive 0.14..0.42`) -> groove kicks + closed hi-hats.
+            #   * Active footwork (`lower_drive >= 0.42` or `cg_now`) -> full kicks, snares, open hats & ghost notes!
             drums = p.drums
             drums_playing = self.beat_active and not paused
-            is_bar4_fill = (self.bar_in_cycle == 3 and slot >= 12 and self.section in ('CHORUS', 'DROP') and drums_playing)
-            if self.section == 'BUILDUP' and self.beat_active and not paused:
+            if self.section == 'BUILDUP' and drums_playing:
                 if slot % 2 == 0:
                     roll_vel = clamp(0.28 + 0.44 * features.shoulder_lift, 0.26, 0.74)
                     events.append(Event(3, 0, 38, roll_vel, target))
-            elif is_bar4_fill:
-                for f_step, f_note in drums.fill_bar4:
-                    if f_step == slot:
-                        events.append(Event(3, 0, f_note, clamp(0.48 + 0.34 * live_energy, 0.35, 0.88), target + swing_amt))
-            elif self.section in ('GROOVE', 'CHORUS', 'DROP') and drums_playing:
-                use_full = self.section in ('CHORUS', 'DROP') or features.side_step_groove
-                kicks = drums.kick_full if use_full else drums.kick_groove
-                hats = drums.hat_full if use_full else drums.hat_groove
-                if slot in kicks:
-                    self._try_emit_kick(events, target, clamp(0.52 + 0.38 * live_energy, 0.38, 0.92))
-                if use_full and slot in drums.snare:
-                    events.append(Event(3, 0, 38, clamp(0.40 + 0.36 * live_energy, 0.32, 0.84), target + swing_amt))
-                if slot in hats:
-                    hat_note = 46 if (use_full and slot in drums.open_hat and features.expansion > 0.55) else 42
-                    events.append(Event(3, 0, hat_note, clamp(0.22 + 0.24 * live_energy, 0.16, 0.62), target + swing_amt))
-                if (self.shoulder_groove_active or features.side_step_groove) and use_full and slot in drums.ghost_snare:
-                    events.append(Event(3, 0, 38, clamp(0.20 + 0.18 * features.shoulder_bounce, 0.18, 0.40), target + swing_amt))
+            elif sparse_feet and drums_playing:
+                if slot == 0 and self.section in ('GROOVE', 'CHORUS'):
+                    self._try_emit_kick(events, target, 0.38)
+            elif (self.section in ('GROOVE', 'CHORUS', 'DROP') or cg_now) and drums_playing:
+                active_footwork = (not features.legs_visible) or lower_drive >= 0.42 or features.side_step_groove or cg_now
+                use_full = active_footwork and (self.section in ('CHORUS', 'DROP') or features.side_step_groove or cg_now)
+                is_bar4_fill = (self.bar_in_cycle == 3 and slot >= 12 and use_full)
+                rhythm_e = clamp(0.75 * lower_drive + 0.25 * live_energy) if features.legs_visible else live_energy
+                if cg_now:
+                    rhythm_e = max(0.68, rhythm_e)
+
+                if is_bar4_fill:
+                    for f_step, f_note in drums.fill_bar4:
+                        if f_step == slot:
+                            events.append(Event(3, 0, f_note, clamp(0.48 + 0.34 * rhythm_e, 0.35, 0.88), target + swing_amt))
+                else:
+                    kicks = drums.kick_full if use_full else drums.kick_groove
+                    hats = drums.hat_full if use_full else drums.hat_groove
+                    if slot in kicks:
+                        self._try_emit_kick(events, target, clamp(0.50 + 0.40 * rhythm_e, 0.38, 0.92))
+                    if active_footwork and slot in drums.snare and (use_full or lower_drive >= 0.32):
+                        events.append(Event(3, 0, 38, clamp(0.38 + 0.38 * rhythm_e, 0.30, 0.84), target + swing_amt))
+                    if slot in hats or (cg_flavor == 0 and slot % 4 == 2):
+                        open_ok = (use_full and slot in drums.open_hat and features.expansion > 0.55) or (cg_flavor == 0 and slot % 4 == 2)
+                        hat_note = 46 if open_ok else 42
+                        events.append(Event(3, 0, hat_note, clamp(0.22 + 0.26 * rhythm_e, 0.16, 0.64), target + swing_amt))
+                    ghost_ok = (
+                        (self.shoulder_groove_active or features.side_step_groove or lower_drive >= 0.50)
+                        and use_full and slot in drums.ghost_snare
+                    ) or (cg_flavor == 1 and slot in (3, 7, 11, 15))
+                    if ghost_ok:
+                        events.append(Event(3, 0, 38, clamp(0.22 + 0.18 * rhythm_e, 0.18, 0.42), target + swing_amt))
 
             self.tick += 1
             self.next_frame += interval

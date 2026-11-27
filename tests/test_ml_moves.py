@@ -9,13 +9,16 @@ from composer.features import FeatureExtractor
 from composer.moves import (
     DEFAULT_WINDOW_FRAMES,
     FEATURE_DIM,
+    LabSessionRecorder,
     NumpyTcnModel,
     PoseSanitizer,
     StreamingDtwMatcher,
     TemporalMoveClassifier,
+    audit_dataset_dir,
     banded_dtw_distance,
     extract_time_window,
     resample_sequence,
+    write_lab_report,
 )
 from composer.moves.lab import save_pose_clip
 from ml.train_move_net import (
@@ -188,8 +191,11 @@ class Tier2DanceRecognitionTests(unittest.TestCase):
                     feats[18:32, 9] += 0.6 * np.sin(np.linspace(0, np.pi, 14))
                     save_pose_clip(root, cls_name, [tuple(r) for r in feats], list(ts))
 
-            x_tr, y_tr, x_val, y_val, classes = load_dataset_split(root, aug_per_clip=4, val_ratio=0.20, seed=3)
+            x_tr, y_tr, x_val, y_val, classes, eff_win_s = load_dataset_split(
+                root, aug_per_clip=4, val_ratio=0.20, seed=3
+            )
             self.assertEqual(classes, ['idle_random', 'move_a'])
+            self.assertGreaterEqual(eff_win_s, 0.70)
             # 1 unseen validation clip per class = 2 val windows (never augmented!), while train has augmented copies.
             self.assertEqual(len(y_val), 2)
             self.assertGreater(len(y_tr), 30)
@@ -199,6 +205,62 @@ class Tier2DanceRecognitionTests(unittest.TestCase):
             win = extract_time_window(sample_feats, np.linspace(0.0, 1.6, 48), window_seconds=0.80, target_frames=24)
             self.assertEqual(win.shape, (24, FEATURE_DIM))
             self.assertGreater(float(np.max(win[:, 9])), 0.9)
+
+    def test_multi_scale_speed_and_posture_tolerant_dtw_plus_lab_diagnostics(self):
+        # Record a 1.4s template move, then test reproducing it 40% SLOWER (2.0s), 30% SMALLER amplitude,
+        # and with a DIFFERENT person's resting shoulder/stance offset!
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            t_tpl = np.linspace(0.0, 1.4, 42, dtype=np.float64)
+            for rep in range(4):
+                seq = np.zeros((42, FEATURE_DIM), dtype=np.float32)
+                seq[:, 0], seq[:, 2] = -0.34, 0.34
+                seq[:, 9] = 0.40 + 0.50 * np.sin(2.0 * np.pi * t_tpl / 1.4) + 0.02 * rep
+                seq[:, 11] = 0.40 - 0.50 * np.sin(2.0 * np.pi * t_tpl / 1.4)
+                save_pose_clip(root, 'kakaka_wave', [tuple(r) for r in seq], list(t_tpl))
+
+            # Also create a tiny-motion frontal move to verify Dataset Health Audit catches it.
+            low_seq = np.zeros((30, FEATURE_DIM), dtype=np.float32)
+            low_seq[:, 22] = 0.04 * np.sin(np.linspace(0, 2 * np.pi, 30))
+            save_pose_clip(root, 'frontal_roll', [tuple(r) for r in low_seq], list(np.linspace(0, 1.0, 30)))
+
+            audit = audit_dataset_dir(root)
+            self.assertTrue(any('frontal_roll' in w and 'low 2D motion' in w for w in audit['warnings']))
+
+            matcher = StreamingDtwMatcher.from_directory(root / '..', eval_stride=1)  # empty parent check
+            self.assertEqual(matcher.labels, ())
+
+            matcher = StreamingDtwMatcher.from_directory(root, eval_stride=1)
+            # Different person (wider shoulders -0.45/+0.45, 0.70x smaller amplitude, 40% slower = 1.96s!).
+            t_slow = np.linspace(0.0, 1.96, 58, dtype=np.float64)
+            fired = []
+            diag_jsonl = root / 'lab_diag_test.jsonl'
+            rec = LabSessionRecorder(diag_jsonl, {'mode': 'unit_test'})
+            ext = FeatureExtractor()
+            for i, ts in enumerate(t_slow):
+                vec = np.zeros(FEATURE_DIM, dtype=np.float32)
+                vec[0], vec[2] = -0.45, 0.45  # wider shoulders / shifted posture!
+                vec[9] = 0.52 + 0.35 * np.sin(2.0 * np.pi * ts / 1.96)
+                vec[11] = 0.52 - 0.35 * np.sin(2.0 * np.pi * ts / 1.96)
+                evs = matcher.update(float(ts), tuple(float(x) for x in vec))
+                fired.extend(evs)
+                f = ext.update(_pose(), float(ts))
+                rec.record_frame(
+                    elapsed_s=float(ts),
+                    points=_pose(),
+                    pose_frame=ext.last_pose_frame,
+                    features=f,
+                    dtw_scores=matcher.last_scores,
+                    dtw_distances=matcher.last_distances,
+                    dtw_thresholds=matcher.label_thresholds,
+                    marked_attempt=(i == 45),
+                )
+            rec.close({'events': len(fired)})
+            summary, report_md = write_lab_report(diag_jsonl, dataset_dir=root)
+
+            self.assertTrue(any(e.kind == 'KAKAKA_WAVE' for e in fired), f'Expected KAKAKA_WAVE, got {fired}')
+            self.assertTrue(report_md.is_file())
+            self.assertEqual(len(summary['attempt_diagnostics']), 1)
 
 
 if __name__ == '__main__':

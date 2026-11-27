@@ -68,6 +68,7 @@ class Features:
     side_step_groove: bool = False  # True during rhythmic side-step dance groove
     squat_depth: float = 0.0        # 0..1 continuous deep squat underwater filter dive
     active_move_label: str = ''
+    tier2_anticipation: float = 0.0  # 0..1 continuous swell while a custom Tier 2 move is forming
     wiggle_suppressed: bool = False
     glitch_joints: tuple[str, ...] = ()
     # Multi-source detected body rhythm
@@ -88,17 +89,20 @@ class FeatureExtractor:
         missing_grace_seconds: float = 0.30,
         tcn_model_path: Path | str | None = None,
         dtw_dir: Path | str | None = None,
+        tier2_threshold: float | None = None,
     ):
         self.missing_grace_seconds = missing_grace_seconds
         self.sanitizer = PoseSanitizer()
         self.move_recognizer = BodyMoveRecognizer()
+        tcn_kw = {'enter_threshold': float(tier2_threshold)} if tier2_threshold is not None else {}
         self.tcn_classifier: TemporalMoveClassifier | None = (
-            TemporalMoveClassifier.from_npz(tcn_model_path)
+            TemporalMoveClassifier.from_npz(tcn_model_path, **tcn_kw)
             if (tcn_model_path and Path(tcn_model_path).is_file())
             else None
         )
+        dtw_kw = {'min_confidence': float(tier2_threshold)} if tier2_threshold is not None else {}
         self.dtw_matcher: StreamingDtwMatcher | None = (
-            StreamingDtwMatcher.from_directory(Path(dtw_dir))
+            StreamingDtwMatcher.from_directory(Path(dtw_dir), **dtw_kw)
             if (dtw_dir and Path(dtw_dir).is_dir())
             else None
         )
@@ -367,13 +371,44 @@ class FeatureExtractor:
         self.last_right_leg_lift = leg_lifts[1] if active[3] else self.last_right_leg_lift * math.exp(-clamped_dt / 0.25)
         if active[2] and active[3]:
             self.last_stance_width = clamp((abs(positions[2][0] - positions[3][0]) - 0.18) / 0.85)
+
+        # Compute hip bounce & lateral sway early so lower-body rhythm drives leg_energy and core energy!
+        hip_f = self._hip_filter.filter(hip, clamped_dt)
+        raw_hip_y = (points[23][1] + points[24][1]) * 0.5
+        if self.hip_y_baseline is None:
+            self.hip_y_baseline = raw_hip_y
+        else:
+            self.hip_y_baseline += (1.0 - math.exp(-clamped_dt / 5.0)) * (raw_hip_y - self.hip_y_baseline)
+        rel_elev = (self.hip_y_baseline - raw_hip_y) / max(scale, 0.05)
+        self.last_body_level = clamp(0.65 + rel_elev * 0.90, 0.15, 1.0)
+
+        if self.hip_x_baseline is None:
+            self.hip_x_baseline = hip_f[0]
+        else:
+            self.hip_x_baseline += (1.0 - math.exp(-clamped_dt / 1.5)) * (hip_f[0] - self.hip_x_baseline)
+        self.last_hip_sway = clamp(((hip_f[0] - self.hip_x_baseline) / scale) / 0.35, -1.0, 1.0)
+
+        hip_bounce_vel = (self.prev_hip_y - hip_f[1]) / (scale * dt) if self.prev_hip_y is not None else 0.0
+        self.prev_hip_y = hip_f[1]
+        hip_activity = clamp(max(0.0, abs(hip_bounce_vel) - 0.12) / 2.2 + 0.45 * abs(self.last_hip_sway))
+
         raw_leg_speed = 0.5 * (limb_speeds[2] + limb_speeds[3]) if (active[2] and active[3]) else max(limb_speeds[2], limb_speeds[3])
-        clean_leg_spd = max(0.0, raw_leg_speed - 0.35)
-        target_leg_energy = clamp((clean_leg_spd / 2.2) + 0.50 * max(self.last_left_leg_lift, self.last_right_leg_lift)) if legs_visible else 0.0
-        leg_tau = 0.12 if target_leg_energy > self.leg_energy else 0.35
+        clean_leg_spd = max(0.0, raw_leg_speed - 0.22)
+        target_leg_energy = (
+            clamp((clean_leg_spd / 1.45) + 0.65 * max(self.last_left_leg_lift, self.last_right_leg_lift) + 0.35 * hip_activity)
+            if legs_visible
+            else 0.0
+        )
+        leg_tau = 0.10 if target_leg_energy > self.leg_energy else 0.35
         self.leg_energy += (1.0 - math.exp(-clamped_dt / leg_tau)) * (target_leg_energy - self.leg_energy)
 
-        target_energy = clamp(speed / 5.4 + (0.20 * self.leg_energy if legs_visible else 0.0))
+        # Lower body (legs + hips) carries 62% of global musical energy when visible!
+        arm_avg_speed = 0.5 * (limb_speeds[0] + limb_speeds[1])
+        upper_energy = clamp(arm_avg_speed / 5.2)
+        if legs_visible:
+            target_energy = clamp(0.62 * self.leg_energy + 0.38 * upper_energy)
+        else:
+            target_energy = clamp(speed / 5.2 + 0.30 * hip_activity)
         e_tau = 0.12 if target_energy > self.energy else 0.42
         self.energy += (1.0 - math.exp(-clamped_dt / e_tau)) * (target_energy - self.energy)
 
@@ -459,31 +494,13 @@ class FeatureExtractor:
         b_tau = 0.10 if target_bounce > self.shoulder_bounce else 0.42
         self.shoulder_bounce += (1.0 - math.exp(-clamped_dt / b_tau)) * (target_bounce - self.shoulder_bounce)
 
-        # Torso & Hip smooth macros.
+        # Torso lean & twist smooth macros (hip bounce & sway already updated above).
         torso_dx = shoulder[0] - hip[0]
         torso_dy = max(1e-4, hip[1] - shoulder[1])
         self.last_torso_lean = clamp(math.atan2(torso_dx, torso_dy) / 0.45, -1.0, 1.0)
         sh_dx = abs(xyz[12][0] - xyz[11][0]) / scale
         sh_dz = abs(xyz[12][2] - xyz[11][2]) / scale
         self.last_torso_twist = clamp(max(clamp((0.68 - sh_dx) / 0.45), clamp((sh_dz - 0.15) / 0.65)))
-
-        hip_f = self._hip_filter.filter(hip, clamped_dt)
-        raw_hip_y = (points[23][1] + points[24][1]) * 0.5
-        if self.hip_y_baseline is None:
-            self.hip_y_baseline = raw_hip_y
-        else:
-            self.hip_y_baseline += (1.0 - math.exp(-clamped_dt / 5.0)) * (raw_hip_y - self.hip_y_baseline)
-        rel_elev = (self.hip_y_baseline - raw_hip_y) / max(scale, 0.05)
-        self.last_body_level = clamp(0.65 + rel_elev * 0.90, 0.15, 1.0)
-
-        if self.hip_x_baseline is None:
-            self.hip_x_baseline = hip_f[0]
-        else:
-            self.hip_x_baseline += (1.0 - math.exp(-clamped_dt / 1.5)) * (hip_f[0] - self.hip_x_baseline)
-        self.last_hip_sway = clamp(((hip_f[0] - self.hip_x_baseline) / scale) / 0.35, -1.0, 1.0)
-
-        hip_bounce_vel = (self.prev_hip_y - hip_f[1]) / (scale * dt) if self.prev_hip_y is not None else 0.0
-        self.prev_hip_y = hip_f[1]
 
         if active[0] and active[1]:
             self.last_lateral_balance = clamp((positions[0][0] + positions[1][0]) * 0.5, -1.0, 1.0)
@@ -492,8 +509,7 @@ class FeatureExtractor:
         elif active[1]:
             self.last_lateral_balance = clamp(positions[1][0] * 0.5, -1.0, 1.0)
 
-        arm_avg_speed = 0.5 * (limb_speeds[0] + limb_speeds[1])
-        leg_pulse = (self.last_left_leg_lift + self.last_right_leg_lift + 0.30 * (limb_speeds[2] + limb_speeds[3])) if legs_visible else 0.0
+        leg_pulse = (self.last_left_leg_lift + self.last_right_leg_lift + 0.45 * (limb_speeds[2] + limb_speeds[3])) if legs_visible else 0.0
         body_bpm, body_bpm_conf = self.tempo_tracker.update(
             timestamp,
             hip_y=hip_f[1] / scale,
@@ -523,6 +539,29 @@ class FeatureExtractor:
             sh_sign = 1.0 if (xyz[11][0] >= xyz[12][0]) else -1.0
             wrist_cross_metric = ((xyz[15][0] - xyz[16][0]) * sh_sign) / scale
             chain_y = tuple((hip[1] - xyz[idx][1]) / scale for idx in (15, 13, 11, 12, 14, 16))
+
+        # Evaluate Tier 2 (Keras TCN .npz and/or Few-Shot DTW) BEFORE unified arbitration so the
+        # Tier 2 Intent Shield blocks opportunistic Tier 1 punches/bursts while a custom move forms!
+        t2_events: list[MoveEvent] = []
+        ml_probs: dict[str, float] = {}
+        tier2_conf = 0.0
+        if pose_frame.tracked:
+            if self.tcn_classifier is not None:
+                t2_events.extend(self.tcn_classifier.update(timestamp, pose_frame.feature_vector))
+                ml_probs.update(self.tcn_classifier.last_probs)
+            if self.dtw_matcher is not None:
+                t2_events.extend(self.dtw_matcher.update(timestamp, pose_frame.feature_vector))
+                for k, v in self.dtw_matcher.last_scores.items():
+                    ml_probs.setdefault(f'dtw:{k}', v)
+            non_null_probs = [
+                float(v)
+                for k, v in ml_probs.items()
+                if k.split(':', 1)[-1].lower() not in ('idle', 'idle_random', 'null', 'none', 'background')
+            ]
+            if non_null_probs:
+                tier2_conf = max(non_null_probs)
+        self.last_ml_probs = ml_probs
+        tier2_anticipation = clamp((tier2_conf - 0.32) / 0.38) if tier2_conf > 0.32 else 0.0
 
         move_snap = self.move_recognizer.update(
             timestamp=timestamp,
@@ -557,29 +596,10 @@ class FeatureExtractor:
             left_leg_vy=left_leg_vy,
             right_leg_vy=right_leg_vy,
             glitch_joints=pose_frame.glitch_joints,
+            extra_candidates=t2_events,
+            tier2_confidence=tier2_conf,
         )
-
-        # Optional Tier 2 Temporal Dance Recognizer (Keras TCN .npz and/or Few-Shot DTW templates).
         all_moves = list(move_snap.events)
-        ml_probs: dict[str, float] = {}
-        if pose_frame.tracked:
-            t2_events: list[MoveEvent] = []
-            if self.tcn_classifier is not None:
-                t2_events.extend(self.tcn_classifier.update(timestamp, pose_frame.feature_vector))
-                ml_probs.update(self.tcn_classifier.last_probs)
-            if self.dtw_matcher is not None:
-                t2_events.extend(self.dtw_matcher.update(timestamp, pose_frame.feature_vector))
-                for k, v in self.dtw_matcher.last_scores.items():
-                    ml_probs.setdefault(f'dtw:{k}', v)
-            if t2_events:
-                all_moves = self.move_recognizer.arbiter.arbitrate(
-                    all_moves + t2_events,
-                    timestamp=timestamp,
-                    glitch_joints=pose_frame.glitch_joints,
-                    soundwave_rise=move_snap.soundwave_rise,
-                    arms_crossed=move_snap.arms_crossed,
-                )
-        self.last_ml_probs = ml_probs
 
         self.previous, self.velocity, self.last_time = positions, velocities, timestamp
         self.last_valid_time = timestamp
@@ -636,6 +656,7 @@ class FeatureExtractor:
             side_step_groove=move_snap.side_step_groove,
             squat_depth=move_snap.squat_depth,
             active_move_label=active_move_label,
+            tier2_anticipation=tier2_anticipation,
             wiggle_suppressed=pose_frame.wiggle_suppressed,
             glitch_joints=pose_frame.glitch_joints,
             body_bpm=body_bpm,
